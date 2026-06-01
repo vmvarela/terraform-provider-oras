@@ -208,9 +208,17 @@ func newORASRepositoryClient(registry, repository string, cfg clientConfig) (*or
 	}, nil
 }
 
-// resolveCredentials builds a CredentialFunc based on the configured options
-// and environment variable fallbacks. It returns the credential function and
-// the resolved access token (if any) for use in GHCR API calls.
+// resolveCredentials builds a credential function using the following priority:
+//
+//  1. Explicit token from cfg.token
+//  2. Explicit username/password from cfg.username/cfg.password
+//  3. ORAS_TOKEN environment variable
+//  4. For ghcr.io: GHCR_TOKEN, then GITHUB_TOKEN
+//  5. Anonymous access (EmptyCredential)
+//
+// Pre:  registry is a non-empty hostname string.
+// Post: returns a non-nil CredentialFunc; the returned token is non-empty only
+//       when an access token was resolved (cases 1, 3, 4 above).
 func resolveCredentials(registry string, cfg clientConfig) (orasAuth.CredentialFunc, string) {
 	// Priority 1: Explicit token
 	if cfg.token != "" {

@@ -1,3 +1,9 @@
+// GHCR tag deletion support.
+//
+// GitHub Container Registry (ghcr.io) does not support the standard OCI
+// manifest deletion endpoint (DELETE /v2/.../manifests/<digest>); it returns
+// HTTP 405. As a fallback, this file implements tag deletion via the GitHub
+// Packages REST API (https://docs.github.com/en/rest/packages).
 package oras
 
 import (
