@@ -1,11 +1,11 @@
 terraform {
   required_providers {
-    orastate = {
-      source = "vmvarela/orastate"
+    oras = {
+      source = "vmvarela/oras"
     }
   }
 
-  state_store "orastate_oci" {
+  state_store "oras_oci" {
     url = "oci://mi-registry.com/estado"
   }
 }

@@ -19,27 +19,27 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/statestore"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
-	"github.com/vmvarela/terraform-provider-orastate/internal/config"
-	ocistatestore "github.com/vmvarela/terraform-provider-orastate/internal/statestore"
+	"github.com/vmvarela/terraform-provider-oras/internal/config"
+	ocistatestore "github.com/vmvarela/terraform-provider-oras/internal/statestore"
 )
 
 // Compile-time interface checks.
 var (
-	_ provider.Provider               = (*OrastateProvider)(nil)
-	_ provider.ProviderWithStateStores = (*OrastateProvider)(nil)
+	_ provider.Provider               = (*OrasProvider)(nil)
+	_ provider.ProviderWithStateStores = (*OrasProvider)(nil)
 )
 
 // ProviderData holds provider-level configuration forwarded to state stores
 // via ConfigureResponse.StateStoreData.
 type ProviderData = config.ProviderData
 
-// OrastateProvider implements provider.Provider and provider.ProviderWithStateStores.
-type OrastateProvider struct{}
+// OrasProvider implements provider.Provider and provider.ProviderWithStateStores.
+type OrasProvider struct{}
 
 // New returns a provider factory function suitable for providerserver.Serve.
 func New() func() provider.Provider {
 	return func() provider.Provider {
-		return &OrastateProvider{}
+		return &OrasProvider{}
 	}
 }
 
@@ -50,12 +50,12 @@ type providerModel struct {
 }
 
 // Metadata sets the provider type name used to prefix resource/state-store names.
-func (p *OrastateProvider) Metadata(_ context.Context, _ provider.MetadataRequest, resp *provider.MetadataResponse) {
-	resp.TypeName = "orastate"
+func (p *OrasProvider) Metadata(_ context.Context, _ provider.MetadataRequest, resp *provider.MetadataResponse) {
+	resp.TypeName = "oras"
 }
 
 // Schema declares provider-level configuration attributes.
-func (p *OrastateProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp *provider.SchemaResponse) {
+func (p *OrasProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp *provider.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Provider for storing Terraform state in OCI registries via the ORAS protocol.",
 		Attributes: map[string]schema.Attribute{
@@ -74,7 +74,7 @@ func (p *OrastateProvider) Schema(_ context.Context, _ provider.SchemaRequest, r
 // Configure reads provider configuration, builds an HTTP client with the
 // requested TLS settings, and stores a *ProviderData in resp.StateStoreData so
 // that state stores can call Configure to receive it.
-func (p *OrastateProvider) Configure(ctx context.Context, req provider.ConfigureRequest, resp *provider.ConfigureResponse) {
+func (p *OrasProvider) Configure(ctx context.Context, req provider.ConfigureRequest, resp *provider.ConfigureResponse) {
 	var cfg providerModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &cfg)...)
 	if resp.Diagnostics.HasError() {
@@ -106,13 +106,13 @@ func (p *OrastateProvider) Configure(ctx context.Context, req provider.Configure
 }
 
 // DataSources returns no data sources; this is a state-store-only provider.
-func (p *OrastateProvider) DataSources(_ context.Context) []func() datasource.DataSource { return nil }
+func (p *OrasProvider) DataSources(_ context.Context) []func() datasource.DataSource { return nil }
 
 // Resources returns no managed resources; this is a state-store-only provider.
-func (p *OrastateProvider) Resources(_ context.Context) []func() resource.Resource { return nil }
+func (p *OrasProvider) Resources(_ context.Context) []func() resource.Resource { return nil }
 
 // StateStores returns the OCI state store factory.
-func (p *OrastateProvider) StateStores(_ context.Context) []func() statestore.StateStore {
+func (p *OrasProvider) StateStores(_ context.Context) []func() statestore.StateStore {
 	return []func() statestore.StateStore{
 		ocistatestore.New(),
 	}

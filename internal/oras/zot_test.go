@@ -57,7 +57,7 @@ func startZot(t *testing.T, port string) (containerID string) {
 		t.Fatalf("write zot config: %v", err)
 	}
 
-	containerName := fmt.Sprintf("orastate-zot-test-%s", port)
+	containerName := fmt.Sprintf("oras-zot-test-%s", port)
 	cmd := exec.Command("docker", "run", "-d", "--rm",
 		"--name", containerName,
 		"-p", port+":"+zotContainerPort,

@@ -1,18 +1,18 @@
-# terraform-provider-orastate
+# terraform-provider-oras
 
 A Terraform provider that stores Terraform state in any OCI-compatible registry using the ORAS (OCI Registry As Storage) protocol. If your team already runs GitHub Container Registry, Docker Hub, Zot, or another OCI registry, you can skip the dedicated S3/GCS/Azure backend and consolidate state storage onto infrastructure you already operate. The provider implements the experimental `statestore.StateStore` plugin interface introduced in Terraform 1.16.
 
 ```hcl
 terraform {
   required_providers {
-    orastate = {
-      source  = "registry.terraform.io/vmvarela/orastate"
+    oras = {
+      source  = "registry.terraform.io/vmvarela/oras"
       version = "~> 0.1"
     }
   }
 }
 
-provider "orastate" {
+provider "oras" {
   # insecure = true   # skip TLS (dev only)
   # ca_file  = "/path/to/ca.pem"
 }
@@ -22,7 +22,7 @@ provider "orastate" {
 
 ```hcl
 terraform {
-  state_store "orastate_oci" {
+  state_store "oras_oci" {
     url          = "oci://ghcr.io/myorg/infra-tfstate"
     compression  = true
     lock_ttl     = "15m"
@@ -78,7 +78,7 @@ GHCR has a notable quirk: it returns HTTP 405 on manifest deletion. When the pro
 ## Development
 
 ```bash
-go build -o terraform-provider-orastate .
+go build -o terraform-provider-oras .
 make install   # builds + copies to ~/.terraform.d/plugins/.../darwin_arm64/
 cp .terraformrc.dev ~/.terraformrc
 ```

@@ -16,8 +16,8 @@ import (
 	ssschema "github.com/hashicorp/terraform-plugin-framework/statestore/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
-	"github.com/vmvarela/terraform-provider-orastate/internal/config"
-	"github.com/vmvarela/terraform-provider-orastate/internal/oras"
+	"github.com/vmvarela/terraform-provider-oras/internal/config"
+	"github.com/vmvarela/terraform-provider-oras/internal/oras"
 )
 
 // Compile-time interface checks.
@@ -40,7 +40,7 @@ func New() func() fwss.StateStore {
 	}
 }
 
-// storeModel is the HCL schema model for the state_store "orastate_oci" block.
+// storeModel is the HCL schema model for the state_store "oras_oci" block.
 type storeModel struct {
 	URL          types.String `tfsdk:"url"`
 	Compression  types.Bool   `tfsdk:"compression"`
