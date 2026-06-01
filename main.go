@@ -1,4 +1,4 @@
-// Package main is the entry point for the terraform-provider-orastate provider.
+// Package main is the entry point for the terraform-provider-oras provider.
 // It serves the OCI state store provider using the Terraform Plugin Framework.
 package main
 
@@ -9,7 +9,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
 
-	internalprovider "github.com/vmvarela/terraform-provider-orastate/internal/provider"
+	internalprovider "github.com/vmvarela/terraform-provider-oras/internal/provider"
 )
 
 func main() {

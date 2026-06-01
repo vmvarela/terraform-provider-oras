@@ -173,8 +173,8 @@ func TestNewORASHTTPClient(t *testing.T) {
 		if !ok {
 			t.Fatalf("transport is %T, want *userAgentRoundTripper", client.Transport)
 		}
-		if rt.userAgent != "terraform-provider-orastate/1.0" {
-			t.Errorf("userAgent = %q, want %q", rt.userAgent, "terraform-provider-orastate/1.0")
+		if rt.userAgent != "terraform-provider-oras/1.0" {
+			t.Errorf("userAgent = %q, want %q", rt.userAgent, "terraform-provider-oras/1.0")
 		}
 	})
 

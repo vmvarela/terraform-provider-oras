@@ -1,7 +1,7 @@
-BINARY     = terraform-provider-orastate
+BINARY     = terraform-provider-oras
 VERSION   ?= 0.1.0
 OS_ARCH    = $(shell go env GOOS)_$(shell go env GOARCH)
-PLUGIN_DIR = $(HOME)/.terraform.d/plugins/registry.terraform.io/vmvarela/orastate/$(VERSION)/$(OS_ARCH)
+PLUGIN_DIR = $(HOME)/.terraform.d/plugins/registry.terraform.io/vmvarela/oras/$(VERSION)/$(OS_ARCH)
 
 .PHONY: build install test test-zot lint clean
 

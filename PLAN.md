@@ -1,4 +1,4 @@
-# Plan: `terraform-provider-orastate`
+# Plan: `terraform-provider-oras`
 
 > Plugin experimental de Terraform que implementa `statestore.StateStore` para almacenar
 > `tfstate` en OCI registries, reutilizando la lógica ORAS de `ghoten` como referencia.
@@ -9,8 +9,8 @@
 
 | Decisión | Opción elegida |
 |---|---|
-| Módulo Go | `github.com/vmvarela/terraform-provider-orastate` |
-| Provider source | `registry.terraform.io/vmvarela/orastate` |
+| Módulo Go | `github.com/vmvarela/terraform-provider-oras` |
+| Provider source | `registry.terraform.io/vmvarela/oras` |
 | Config API | URL única: `url = "oci://registry/repo"` |
 | Auth | A nivel del `provider` block (insecure, ca_file) |
 | GHCR fallback | Incluido desde el principio |
@@ -34,15 +34,15 @@
 ## Estructura objetivo
 
 ```
-terraform-provider-orastate/
+terraform-provider-oras/
 ├── main.go                          # Entrada CLI del provider
-├── go.mod                           # github.com/vmvarela/terraform-provider-orastate
+├── go.mod                           # github.com/vmvarela/terraform-provider-oras
 ├── go.sum
 ├── Makefile
 ├── .terraform-version               # 1.16.0-alpha20260513
 ├── .envrc                           # TF_ENABLE_PLUGGABLE_STATE_STORAGE=1
 ├── .terraformrc.dev                 # Dev overrides para pruebas locales
-├── test.tf                          # state_store "orastate_oci"
+├── test.tf                          # state_store "oras_oci"
 ├── PLAN.md                          # (este archivo)
 ├── internal/
 │   ├── provider/
@@ -83,19 +83,19 @@ go build ./...
 
 ```go
 // Obligatorio: provider.Provider
-func (p *OrastateProvider) Metadata(...)  // TypeName = "orastate"
-func (p *OrastateProvider) Schema(...)    // insecure (bool), ca_file (string)
-func (p *OrastateProvider) Configure(...) // crea http.Client y resuelve credenciales
-func (p *OrastateProvider) DataSources()  // nil
-func (p *OrastateProvider) Resources()    // nil
+func (p *OrasProvider) Metadata(...)  // TypeName = "oras"
+func (p *OrasProvider) Schema(...)    // insecure (bool), ca_file (string)
+func (p *OrasProvider) Configure(...) // crea http.Client y resuelve credenciales
+func (p *OrasProvider) DataSources()  // nil
+func (p *OrasProvider) Resources()    // nil
 
 // Opcional: provider.ProviderWithStateStores
-func (p *OrastateProvider) StateStores() []func() statestore.StateStore
+func (p *OrasProvider) StateStores() []func() statestore.StateStore
 ```
 
 ### 🎯 Criterio de éxito
 
-`go build` compila sin errores y el binary `terraform-provider-orastate` se genera.
+`go build` compila sin errores y el binary `terraform-provider-oras` se genera.
 
 ---
 
@@ -161,7 +161,7 @@ go test -count=1 ./internal/oras/...
 
 | Método | Lógica |
 |---|---|
-| `Metadata` | `TypeName = req.ProviderTypeName + "_oci"` → `"orastate_oci"` |
+| `Metadata` | `TypeName = req.ProviderTypeName + "_oci"` → `"oras_oci"` |
 | `Schema` | `url` (required), `compression` (bool), `lock_ttl` (string), `max_versions` (int64), `max_state_size` (int64) |
 | `Initialize` | Parsea URL → crea `oras.Client` → asigna a `resp.StateStoreData` |
 | `Read` | `client.Get(ctx, req.StateID)` |
@@ -181,12 +181,12 @@ go test -count=1 ./internal/oras/...
 terraform {
   required_providers {
     orastate = {
-      source = "vmvarela/orastate"
+      source = "vmvarela/oras"
     }
   }
 
-  state_store "orastate_oci" {
-    provider "orastate" {
+  state_store "oras_oci" {
+    provider "oras" {
       insecure = true
     }
     url          = "oci://ghcr.io/myorg/infra-state"
@@ -250,12 +250,12 @@ TF_ORAS_ZOT_TEST=1 go test -race -v -timeout 120s ./internal/oras/... -run Zot
 ### Makefile targets
 
 ```makefile
-build          # go build -o terraform-provider-orastate .
+build          # go build -o terraform-provider-oras .
 install        # Instala en ~/.terraform.d/plugins/.../darwin_arm64/
 test           # go test -race -count=1 ./...
 test-zot       # Integration test contra Zot
 lint           # golangci-lint run ./...
-clean          # rm -f terraform-provider-orastate
+clean          # rm -f terraform-provider-oras
 ```
 
 ### `.terraformrc.dev`
@@ -263,7 +263,7 @@ clean          # rm -f terraform-provider-orastate
 ```hcl
 provider_installation {
   dev_overrides {
-    "vmvarela/orastate" = "/ruta/al/repo"
+    "vmvarela/oras" = "/ruta/al/repo"
   }
   direct {}
 }
@@ -275,11 +275,11 @@ provider_installation {
 terraform {
   required_providers {
     orastate = {
-      source = "vmvarela/orastate"
+      source = "vmvarela/oras"
     }
   }
 
-  state_store "orastate_oci" {
+  state_store "oras_oci" {
     url = "oci://mi-registry.com/estado"
   }
 }

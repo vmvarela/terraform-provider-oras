@@ -1,4 +1,4 @@
-module github.com/vmvarela/terraform-provider-orastate
+module github.com/vmvarela/terraform-provider-oras
 
 go 1.26
 

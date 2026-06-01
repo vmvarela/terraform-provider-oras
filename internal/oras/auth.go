@@ -304,7 +304,7 @@ func newORASHTTPClient(insecure bool, caFile string) (*http.Client, error) {
 	client := &http.Client{
 		Transport: &userAgentRoundTripper{
 			next: transport,
-			userAgent: "terraform-provider-orastate/1.0",
+			userAgent: "terraform-provider-oras/1.0",
 		},
 	}
 
