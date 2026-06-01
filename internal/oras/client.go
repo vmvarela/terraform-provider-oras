@@ -10,7 +10,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"crypto/md5"  //nolint:gosec // MD5 used for ETag-like change detection, not security
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -302,9 +301,6 @@ func (wc *workspaceClient) get(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("state size exceeds maximum allowed size of %d bytes; use the max_state_size option to increase the limit", limit)
 	}
 
-	// Return MD5 is not needed here (unlike ghoten's remote.Payload).
-	// The caller (StateStore) just needs the raw bytes.
-	_ = md5.Sum(data) //nolint:gosec // suppress unused, kept for documentation
 	return data, nil
 }
 
@@ -421,6 +417,17 @@ func (c *Client) Lock(ctx context.Context, stateID string, info LockInfo) (strin
 	return wc.lock(ctx, &info)
 }
 
+// lock acquires a distributed lock for the workspace using generation-based
+// optimistic concurrency control.
+//
+// Pre:  ctx is non-nil; info is non-nil with a non-empty ID field.
+// Post: on success, returns info.ID and the lock tag references a manifest with
+//       Generation == previous_generation+1 and HolderID == info.ID.
+//       On failure with an existing lock, returns *LockError with Info populated.
+//
+// Bounding function (termination): the function does not loop; it performs at
+// most one stale-lock clear followed by one tag+verify attempt. All retries are
+// delegated to withRetryNoResult with a finite MaxAttempts bound.
 func (wc *workspaceClient) lock(ctx context.Context, info *LockInfo) (string, error) {
 	if info == nil {
 		return "", fmt.Errorf("lock info is required")
@@ -637,6 +644,17 @@ func (wc *workspaceClient) listExistingVersions(ctx context.Context) ([]int, err
 	return existing, nil
 }
 
+// enforceVersionRetention prunes old state versions, keeping at most
+// wc.versioningMaxVersions versions.
+//
+// Pre:  wc.versioningMaxVersions > 0; versions contains the list of known
+//       version numbers for this workspace.
+// Post: at most wc.versioningMaxVersions versions remain in the registry;
+//       the current manifest (identified by current.Digest) is never deleted.
+//
+// Loop invariant (over groups): each group processed has its keep-tagged
+// manifests retagged to a new digest before the old digest is deleted.
+// Bounding function: len(groups) - index of processed group.
 func (wc *workspaceClient) enforceVersionRetention(ctx context.Context, current ocispec.Descriptor, versions []int) error {
 	if wc.versioningMaxVersions <= 0 || len(versions) <= wc.versioningMaxVersions {
 		return nil
@@ -919,7 +937,13 @@ func workspaceTagFor(workspace string) string {
 	return "ws-" + hex.EncodeToString(h[:8])
 }
 
-// listWorkspacesFromTags discovers workspace names by scanning OCI tags.
+// listWorkspacesFromTags discovers workspace names by scanning the repository's
+// OCI tags.
+//
+// Pre:  ctx is non-nil; repo is non-nil with a valid inner repository.
+// Post: returns a sorted, deduplicated list of workspace names. Names that were
+//       originally hashed (ws-* tags) are resolved from their manifest
+//       annotation. Returns nil slice (not error) if no workspaces exist.
 func listWorkspacesFromTags(ctx context.Context, repo *orasRepositoryClient) ([]string, error) {
 	var tags []string
 	if err := repo.inner.Tags(ctx, "", func(page []string) error {
@@ -1032,6 +1056,11 @@ func workspaceNameFromTag(ctx context.Context, repo *orasRepositoryClient, state
 	return wsTag, nil
 }
 
+// compressGzip compresses data using gzip at BestSpeed level.
+//
+// Pre:  data may be nil or empty (both produce valid gzip output).
+// Post: len(result) > 0; gzip.NewReader(bytes.NewReader(result)) succeeds and
+//       decompressing result reproduces data exactly.
 func compressGzip(data []byte) ([]byte, error) {
 	buf := gzipBufPool.Get().(*bytes.Buffer)
 	buf.Reset()
@@ -1055,6 +1084,16 @@ func compressGzip(data []byte) ([]byte, error) {
 
 // ─── Retry helpers ────────────────────────────────────────────────────────────
 
+// withRetry executes operation with exponential backoff, retrying only on
+// transient errors.
+//
+// Pre:  ctx is non-nil; operation is non-nil; cfg.MaxAttempts >= 1.
+// Post: returns the first successful result, or the last error after
+//       cfg.MaxAttempts attempts.
+//
+// Loop invariant: 1 <= attempt <= cfg.MaxAttempts; backoff >= cfg.InitialBackoff.
+// Bounding function: cfg.MaxAttempts - attempt, which strictly decreases each
+// iteration and reaches 0 when attempt == cfg.MaxAttempts.
 func withRetry[T any](ctx context.Context, cfg RetryConfig, operation func(ctx context.Context) (T, error)) (T, error) {
 	var zero T
 	var lastErr error
