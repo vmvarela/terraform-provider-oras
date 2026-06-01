@@ -1,0 +1,6 @@
+provider_installation {
+  dev_overrides {
+    "vmvarela/orastate" = "/Users/victor/dev/vmvarela/terraform-provider-orastate"
+  }
+  direct {}
+}
