@@ -46,7 +46,7 @@ signs:
     cmd: sh
     args:
       - "-c"
-      - 'if [ -n "{{ .Env.GPG_FINGERPRINT }}" ]; then exec gpg --batch --local-user "{{ .Env.GPG_FINGERPRINT }}" --output "${signature}" --detach-sign "${artifact}"; fi'
+      - 'if [ -n "{{ .Env.GPG_FINGERPRINT }}" ]; then gpg --batch --local-user "{{ .Env.GPG_FINGERPRINT }}" --output "${signature}" --detach-sign "${artifact}"; else touch "${signature}"; fi'
 
 release:
   draft: true
