@@ -160,6 +160,12 @@ func TestUserAgentRoundTripper_SetsUserAgent(t *testing.T) {
 
 func TestNewORASHTTPClient(t *testing.T) {
 	t.Run("default client", func(t *testing.T) {
+		// Version is configurable at build time; set it to a known value for
+		// this test to verify the userAgent() function picks it up.
+		origVersion := Version
+		Version = "1.0"
+		t.Cleanup(func() { Version = origVersion })
+
 		client, err := newORASHTTPClient(false, "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -239,8 +245,8 @@ func TestNewORASHTTPClient(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
-		if !strings.Contains(err.Error(), "failed to parse CA certificate from") {
-			t.Errorf("error message does not contain %q: %v", "failed to parse CA certificate from", err)
+		if !strings.Contains(err.Error(), "failed to parse any valid certificates from CA file") {
+			t.Errorf("error message does not contain %q: %v", "failed to parse any valid certificates from CA file", err)
 		}
 	})
 }

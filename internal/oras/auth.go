@@ -17,6 +17,15 @@ import (
 	orasAuth "oras.land/oras-go/v2/registry/remote/auth"
 )
 
+// Version is the provider version, set at build time via -ldflags (e.g. -X 'oras.Version=1.0.0').
+// Defaults to "dev" for development builds.
+var Version = "dev"
+
+// userAgent returns the User-Agent string for HTTP requests.
+func userAgent() string {
+	return "terraform-provider-oras/" + Version
+}
+
 // Client is the top-level ORAS client that holds the shared OCI repository
 // client and configuration for state operations.
 type Client struct {
@@ -39,6 +48,7 @@ type clientConfig struct {
 	maxVersions int
 	maxStateSize int64
 	retryConfig RetryConfig
+	httpClient  *http.Client
 }
 
 // Option configures a Client.
@@ -113,6 +123,14 @@ func WithRetryConfig(cfg RetryConfig) Option {
 	}
 }
 
+// WithHTTPClient sets a custom HTTP client for registry operations.
+// When set, this client is used instead of building one from insecure/caFile settings.
+func WithHTTPClient(client *http.Client) Option {
+	return func(c *clientConfig) {
+		c.httpClient = client
+	}
+}
+
 // orasRepository is the minimal interface for OCI repository operations
 // required by the state backend.
 type orasRepository interface {
@@ -137,7 +155,7 @@ type orasRepositoryClient struct {
 // The host parameter is accepted for future use but currently ignored;
 // the stored token is returned directly.
 // Used by ghcr.go for GitHub API calls.
-func (r *orasRepositoryClient) accessTokenForHost(ctx context.Context, host string) (string, error) {
+func (r *orasRepositoryClient) accessTokenForHost(_ context.Context, host string) (string, error) {
 	return r.token, nil
 }
 
@@ -184,9 +202,15 @@ func newORASRepositoryClient(registry, repository string, cfg clientConfig) (*or
 		repo.PlainHTTP = true
 	}
 
-	httpClient, err := newORASHTTPClient(cfg.insecure, cfg.caFile)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create HTTP client: %w", err)
+	// Use provided HTTP client if set, otherwise build one
+	var httpClient *http.Client
+	if cfg.httpClient != nil {
+		httpClient = cfg.httpClient
+	} else {
+		httpClient, err = newORASHTTPClient(cfg.insecure, cfg.caFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create HTTP client: %w", err)
+		}
 	}
 
 	// Resolve credentials with the following priority:
@@ -210,15 +234,23 @@ func newORASRepositoryClient(registry, repository string, cfg clientConfig) (*or
 
 // resolveCredentials builds a credential function using the following priority:
 //
-//  1. Explicit token from cfg.token
-//  2. Explicit username/password from cfg.username/cfg.password
-//  3. ORAS_TOKEN environment variable
-//  4. For ghcr.io: GHCR_TOKEN, then GITHUB_TOKEN
+// Credential Resolution Order:
+//  1. Explicit token from cfg.token (set via WithToken option)
+//  2. Explicit username/password from cfg.username/cfg.password (set via WithCredentials option)
+//  3. ORAS_TOKEN environment variable (applies to any registry)
+//  4. For ghcr.io only:
+//     a. GHCR_TOKEN environment variable
+//     b. GITHUB_TOKEN environment variable
 //  5. Anonymous access (EmptyCredential)
+//
+// Environment Variable Precedence:
+//   - ORAS_TOKEN: Universal token for any OCI registry
+//   - GHCR_TOKEN: GitHub Container Registry specific token (ghcr.io only)
+//   - GITHUB_TOKEN: GitHub API token, can be used for ghcr.io (ghcr.io only)
 //
 // Pre:  registry is a non-empty hostname string.
 // Post: returns a non-nil CredentialFunc; the returned token is non-empty only
-//       when an access token was resolved (cases 1, 3, 4 above).
+//       when an access token was resolved (cases 1, 3, 4a, 4b above).
 func resolveCredentials(registry string, cfg clientConfig) (orasAuth.CredentialFunc, string) {
 	// Priority 1: Explicit token
 	if cfg.token != "" {
@@ -285,17 +317,19 @@ func newORASHTTPClient(insecure bool, caFile string) (*http.Client, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to read CA file %q: %w", caFile, err)
 		}
-		caCertPool := x509.NewCertPool()
-		if !caCertPool.AppendCertsFromPEM(caCert) {
-			return nil, fmt.Errorf("failed to parse CA certificate from %q", caFile)
-		}
+
+		// Start with system cert pool or create new one
 		if tlsConfig.RootCAs == nil {
 			tlsConfig.RootCAs, _ = x509.SystemCertPool()
 			if tlsConfig.RootCAs == nil {
 				tlsConfig.RootCAs = x509.NewCertPool()
 			}
 		}
-		tlsConfig.RootCAs.AppendCertsFromPEM(caCert)
+
+		// Append and validate custom CA certificates
+		if !tlsConfig.RootCAs.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("failed to parse any valid certificates from CA file %q", caFile)
+		}
 	}
 
 	transport = transport.Clone()
@@ -304,7 +338,7 @@ func newORASHTTPClient(insecure bool, caFile string) (*http.Client, error) {
 	client := &http.Client{
 		Transport: &userAgentRoundTripper{
 			next: transport,
-			userAgent: "terraform-provider-oras/1.0",
+			userAgent: userAgent(),
 		},
 	}
 
