@@ -43,15 +43,10 @@ signs:
     artifacts: checksum
     ids:
       - checksum
+    cmd: sh
     args:
-      - "--batch"
-      - "--local-user"
-      - "{{ .Env.GPG_FINGERPRINT }}"
-      - "--output"
-      - "${signature}"
-      - "--detach-sign"
-      - "${artifact}"
-    if: "{{ .Env.GPG_FINGERPRINT }}"
+      - "-c"
+      - 'if [ -n "{{ .Env.GPG_FINGERPRINT }}" ]; then exec gpg --batch --local-user "{{ .Env.GPG_FINGERPRINT }}" --output "${signature}" --detach-sign "${artifact}"; fi'
 
 release:
   draft: true
