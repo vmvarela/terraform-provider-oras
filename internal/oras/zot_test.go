@@ -41,7 +41,7 @@ func freeLocalPort(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("freeLocalPort: %v", err)
 	}
-	defer l.Close()
+	defer func() { _ = l.Close() }()
 	_, port, err := net.SplitHostPort(l.Addr().String())
 	if err != nil {
 		t.Fatalf("SplitHostPort: %v", err)
@@ -104,7 +104,7 @@ func waitForZot(t *testing.T, addr string) {
 			time.Sleep(250 * time.Millisecond)
 			continue
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 
 		if resp.StatusCode == http.StatusOK {
 			return
@@ -123,7 +123,7 @@ func countZotVersionTags(t *testing.T, addr, repoPath, prefix string) int {
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var result struct {
 		Name string   `json:"name"`

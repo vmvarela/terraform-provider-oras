@@ -18,26 +18,6 @@ import (
 	"time"
 )
 
-// countingRoundTripper counts the number of RoundTrip calls and records
-// the last request received.
-type countingRoundTripper struct {
-	count int
-	last  *http.Request
-	next  http.RoundTripper
-}
-
-func (c *countingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	c.count++
-	c.last = req
-	if c.next != nil {
-		return c.next.RoundTrip(req)
-	}
-	return &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(strings.NewReader("")),
-	}, nil
-}
-
 // headerCapturingRoundTripper captures the request and returns a 200 response.
 type headerCapturingRoundTripper struct {
 	request *http.Request

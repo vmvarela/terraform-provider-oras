@@ -93,7 +93,7 @@ func (p *OrasProvider) ValidateConfig(ctx context.Context, req provider.Validate
 					fmt.Sprintf("ca_file %q does not exist or is not accessible: %v", caFile, err),
 				)
 			} else {
-				f.Close()
+				_ = f.Close()
 			}
 		}
 	}
