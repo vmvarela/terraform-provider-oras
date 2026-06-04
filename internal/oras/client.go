@@ -276,7 +276,7 @@ func (wc *workspaceClient) get(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	var r io.Reader = rc
 	switch layer.MediaType {
@@ -887,7 +887,7 @@ func (wc *workspaceClient) fetchManifestInternal(ctx context.Context, reference 
 	if err != nil {
 		return fetchedManifest{}, err
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	data, err := io.ReadAll(rc)
 	if err != nil {
@@ -1064,7 +1064,7 @@ func workspaceNameFromTag(ctx context.Context, repo *orasRepositoryClient, state
 		if err != nil {
 			return "", err
 		}
-		defer rc.Close()
+		defer func() { _ = rc.Close() }()
 
 		data, err := io.ReadAll(rc)
 		if err != nil {

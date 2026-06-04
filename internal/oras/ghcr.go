@@ -171,7 +171,7 @@ func githubRequest(ctx context.Context, client *http.Client, method, urlStr, tok
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != expectedStatus {
 		// Drain the body so the underlying TCP connection can be reused (HTTP/1.1 keep-alive).

@@ -135,7 +135,7 @@ func (r *raceSimulatingRepo) Tag(ctx context.Context, desc ocispec.Descriptor, r
 		r.triggered = true
 		r.mu.Unlock()
 		// Overwrite the tag with a rival lock manifest.
-		_ = r.delegatingRepo.Push(ctx, r.rivalDesc, bytes.NewReader(r.rivalData))
+		_ = r.Push(ctx, r.rivalDesc, bytes.NewReader(r.rivalData))
 		_ = r.delegatingRepo.Tag(ctx, r.rivalDesc, reference)
 	}
 	return nil
@@ -206,25 +206,10 @@ func (r *sameGenRaceRepo) Tag(ctx context.Context, desc ocispec.Descriptor, refe
 		r.mu.Lock()
 		r.triggered = true
 		r.mu.Unlock()
-		_ = r.delegatingRepo.Push(ctx, r.rivalDesc, bytes.NewReader(r.rivalData))
+		_ = r.Push(ctx, r.rivalDesc, bytes.NewReader(r.rivalData))
 		_ = r.delegatingRepo.Tag(ctx, r.rivalDesc, reference)
 	}
 	return nil
-}
-
-// slowDeleteRepo simulates a slow delete by sleeping before delegating.
-type slowDeleteRepo struct {
-	delegatingRepo
-	delay time.Duration
-}
-
-func (r *slowDeleteRepo) Delete(ctx context.Context, target ocispec.Descriptor) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(r.delay):
-	}
-	return r.delegatingRepo.Delete(ctx, target)
 }
 
 // blockingRepo blocks all operations until the context is cancelled.
@@ -825,7 +810,7 @@ func TestPut_nilAndEmptyState(t *testing.T) {
 		t.Fatalf("get after nil put: %v", err)
 	}
 	// nil state should result in empty data after get
-	if p != nil && len(p) != 0 {
+	if len(p) != 0 {
 		t.Errorf("expected nil or empty after nil put, got %q", string(p))
 	}
 
