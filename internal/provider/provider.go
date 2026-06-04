@@ -13,6 +13,7 @@ import (
 	"os"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -25,8 +26,9 @@ import (
 
 // Compile-time interface checks.
 var (
-	_ provider.Provider               = (*OrasProvider)(nil)
-	_ provider.ProviderWithStateStores = (*OrasProvider)(nil)
+	_ provider.Provider                  = (*OrasProvider)(nil)
+	_ provider.ProviderWithStateStores   = (*OrasProvider)(nil)
+	_ provider.ProviderWithValidateConfig = (*OrasProvider)(nil)
 )
 
 // ProviderData holds provider-level configuration forwarded to state stores
@@ -68,6 +70,32 @@ func (p *OrasProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp 
 				MarkdownDescription: "Path to a PEM-encoded CA certificate bundle to trust when communicating with the OCI registry.",
 			},
 		},
+	}
+}
+
+// ValidateConfig validates the provider configuration before execution.
+func (p *OrasProvider) ValidateConfig(ctx context.Context, req provider.ValidateConfigRequest, resp *provider.ValidateConfigResponse) {
+	var cfg providerModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &cfg)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Validate ca_file exists and is readable if specified
+	if !cfg.CAFile.IsNull() && !cfg.CAFile.IsUnknown() {
+		caFile := cfg.CAFile.ValueString()
+		if caFile != "" {
+			f, err := os.Open(caFile)
+			if err != nil {
+				resp.Diagnostics.AddAttributeError(
+					path.Root("ca_file"),
+					"Invalid CA File",
+					fmt.Sprintf("ca_file %q does not exist or is not accessible: %v", caFile, err),
+				)
+			} else {
+				f.Close()
+			}
+		}
 	}
 }
 

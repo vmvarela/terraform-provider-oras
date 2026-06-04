@@ -95,11 +95,12 @@ func (s *OCIStateStore) ValidateConfig(ctx context.Context, req fwss.ValidateCon
 
 	if !cfg.URL.IsNull() && !cfg.URL.IsUnknown() {
 		u := cfg.URL.ValueString()
-		if !strings.HasPrefix(u, "oci://") {
+		// Validate full URL structure
+		if _, _, err := parseOCIURL(u); err != nil {
 			resp.Diagnostics.AddAttributeError(
 				path.Root("url"),
 				"Invalid OCI URL",
-				fmt.Sprintf("url must start with 'oci://', got: %q", u),
+				err.Error(),
 			)
 		}
 	}
@@ -161,11 +162,16 @@ func (s *OCIStateStore) Initialize(ctx context.Context, req fwss.InitializeReque
 
 	// Forward provider-level TLS settings to the ORAS client.
 	if pd, ok := req.ProviderData.(*config.ProviderData); ok && pd != nil {
-		if pd.Insecure {
-			opts = append(opts, oras.WithInsecure(true))
-		}
-		if pd.CAFile != "" {
-			opts = append(opts, oras.WithCAFile(pd.CAFile))
+		if pd.HTTPClient != nil {
+			opts = append(opts, oras.WithHTTPClient(pd.HTTPClient))
+		} else {
+			// Fallback to individual settings if HTTPClient not available
+			if pd.Insecure {
+				opts = append(opts, oras.WithInsecure(true))
+			}
+			if pd.CAFile != "" {
+				opts = append(opts, oras.WithCAFile(pd.CAFile))
+			}
 		}
 	}
 
@@ -326,6 +332,14 @@ func parseOCIURL(rawURL string) (registry, repository string, err error) {
 	repository = strings.TrimPrefix(u.Path, "/")
 	if repository == "" {
 		return "", "", fmt.Errorf("OCI URL %q is missing the repository path", rawURL)
+	}
+
+	// Validate repository path for invalid components
+	if strings.Contains(repository, "..") {
+		return "", "", fmt.Errorf("OCI URL %q contains invalid path component '..'", rawURL)
+	}
+	if strings.Contains(repository, "//") {
+		return "", "", fmt.Errorf("OCI URL %q contains invalid path component '//'", rawURL)
 	}
 
 	return registry, repository, nil

@@ -78,24 +78,40 @@ func startZot(t *testing.T, port string) (containerID string) {
 // waitForZot polls the registry base endpoint until it responds 200 OK.
 func waitForZot(t *testing.T, addr string) {
 	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
 	url := fmt.Sprintf("http://%s/v2/", addr)
-	deadline := time.Now().Add(15 * time.Second)
 	var lastErr error
-	for time.Now().Before(deadline) {
-		resp, err := http.Get(url) //nolint:noctx
+
+	for {
+		select {
+		case <-ctx.Done():
+			t.Fatalf("zot not ready at %s after 15s: %v", addr, lastErr)
+		default:
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			lastErr = err
+			time.Sleep(250 * time.Millisecond)
+			continue
+		}
+
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			lastErr = err
 			time.Sleep(250 * time.Millisecond)
 			continue
 		}
 		resp.Body.Close()
+
 		if resp.StatusCode == http.StatusOK {
 			return
 		}
 		lastErr = fmt.Errorf("unexpected status: %d", resp.StatusCode)
 		time.Sleep(250 * time.Millisecond)
 	}
-	t.Fatalf("zot not ready at %s after 15s: %v", addr, lastErr)
 }
 
 // countZotVersionTags queries the registry tags list and counts entries

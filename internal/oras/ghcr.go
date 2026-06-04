@@ -165,7 +165,7 @@ func githubRequest(ctx context.Context, client *http.Client, method, urlStr, tok
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", githubAPIVersion)
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("User-Agent", "terraform-provider-oras/1.0")
+	req.Header.Set("User-Agent", userAgent())
 
 	resp, err := client.Do(req)
 	if err != nil {

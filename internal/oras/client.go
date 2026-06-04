@@ -107,13 +107,20 @@ type RetryConfig struct {
 	BackoffMultiplier float64
 }
 
+const (
+	defaultRetryMaxAttempts       = 3
+	defaultRetryInitialBackoff    = time.Second
+	defaultRetryMaxBackoff        = 30 * time.Second
+	defaultRetryBackoffMultiplier = 2.0
+)
+
 // DefaultRetryConfig returns a RetryConfig with sensible defaults.
 func DefaultRetryConfig() RetryConfig {
 	return RetryConfig{
-		MaxAttempts:       3,
-		InitialBackoff:    time.Second,
-		MaxBackoff:        30 * time.Second,
-		BackoffMultiplier: 2.0,
+		MaxAttempts:       defaultRetryMaxAttempts,
+		InitialBackoff:    defaultRetryInitialBackoff,
+		MaxBackoff:        defaultRetryMaxBackoff,
+		BackoffMultiplier: defaultRetryBackoffMultiplier,
 	}
 }
 
@@ -142,7 +149,9 @@ type LockError struct {
 	Info *LockInfo
 	// Err is the underlying error.
 	Err error
-	// InconsistentRead indicates the lock state could not be reliably read.
+	// InconsistentRead indicates the lock state could not be reliably read,
+	// typically due to a race condition or network error during verification.
+	// Callers should treat this as a failed lock attempt and may retry.
 	InconsistentRead bool
 }
 
@@ -354,6 +363,10 @@ func (wc *workspaceClient) put(ctx context.Context, state []byte) error {
 	}
 
 	// Async retention: limits concurrent goroutines via semaphore.
+	// The detached background context (context.Background) is intentional —
+	// these cleanup operations must complete even if the parent context is
+	// cancelled, ensuring version retention limits are enforced regardless
+	// of the calling operation's lifecycle.
 	sem := wc.retentionSem
 	if sem == nil {
 		sem = defaultRetentionSem
@@ -788,8 +801,12 @@ func (wc *workspaceClient) deleteDigestWithFallback(ctx context.Context, desc oc
 		return err
 	}
 
-	if ghErr := tryDeleteGHCRTag(ctx, wc.repo, fallbackTag); ghErr != nil {
-		return fmt.Errorf("oras client retention: registry does not support OCI manifest deletion and GHCR API deletion failed for %q: %w", fallbackTag, ghErr)
+	ghErr := tryDeleteGHCRTag(ctx, wc.repo, fallbackTag)
+	if errors.Is(ghErr, errNotGHCR) {
+		return fmt.Errorf("registry does not support manifest deletion (HTTP 405) and no alternative deletion method is available for %q", fallbackTag)
+	}
+	if ghErr != nil {
+		return fmt.Errorf("registry does not support manifest deletion and GHCR API fallback failed for %q: %w", fallbackTag, ghErr)
 	}
 	return nil
 }
@@ -893,6 +910,9 @@ func parseLockInfo(m *manifest, stateTag string) (*LockInfo, error) {
 	if m.ArtifactType != "" && m.ArtifactType != artifactTypeLock {
 		return nil, fmt.Errorf("unexpected lock manifest artifactType %q", m.ArtifactType)
 	}
+	if m.Annotations == nil {
+		return &LockInfo{}, nil
+	}
 	if raw, ok := m.Annotations[annotationLockInfo]; ok && raw != "" {
 		var info LockInfo
 		if err := json.Unmarshal([]byte(raw), &info); err != nil {
@@ -980,7 +1000,8 @@ func listWorkspacesFromTags(ctx context.Context, repo *orasRepositoryClient) ([]
 		g.Go(func() error {
 			name, err := workspaceNameFromTag(ctx, repo, tag)
 			if err != nil {
-				return err
+				slog.Debug("failed to resolve workspace name", "tag", tag, "error", err)
+				return nil // Continue instead of failing
 			}
 			if name != "" {
 				mu.Lock()
@@ -1020,6 +1041,7 @@ func splitStateVersionTag(tag string) (base string, version int, ok bool) {
 	}
 	s := tag[idx+len(stateVersionTagSeparator):]
 	v, err := strconv.Atoi(s)
+	// Version numbers are bounded to 1<<30 to prevent overflow on 32-bit systems.
 	if err != nil || v <= 0 || v > 1<<30 {
 		return "", 0, false
 	}
@@ -1031,29 +1053,33 @@ func workspaceNameFromTag(ctx context.Context, repo *orasRepositoryClient, state
 	if !strings.HasPrefix(wsTag, "ws-") {
 		return wsTag, nil
 	}
-	desc, err := repo.inner.Resolve(ctx, stateTag)
-	if err != nil {
-		return "", err
-	}
-	rc, err := repo.inner.Fetch(ctx, desc)
-	if err != nil {
-		return "", err
-	}
-	defer rc.Close()
 
-	data, err := io.ReadAll(rc)
-	if err != nil {
-		return "", err
-	}
+	// Use retry for transient errors
+	return withRetry(ctx, DefaultRetryConfig(), func(ctx context.Context) (string, error) {
+		desc, err := repo.inner.Resolve(ctx, stateTag)
+		if err != nil {
+			return "", err
+		}
+		rc, err := repo.inner.Fetch(ctx, desc)
+		if err != nil {
+			return "", err
+		}
+		defer rc.Close()
 
-	var m manifest
-	if err := json.Unmarshal(data, &m); err != nil {
-		return "", fmt.Errorf("decoding manifest for workspace tag %q: %w", stateTag, err)
-	}
-	if name := m.Annotations[annotationWorkspace]; name != "" {
-		return name, nil
-	}
-	return wsTag, nil
+		data, err := io.ReadAll(rc)
+		if err != nil {
+			return "", err
+		}
+
+		var m manifest
+		if err := json.Unmarshal(data, &m); err != nil {
+			return "", fmt.Errorf("decoding manifest for workspace tag %q: %w", stateTag, err)
+		}
+		if name := m.Annotations[annotationWorkspace]; name != "" {
+			return name, nil
+		}
+		return wsTag, nil
+	})
 }
 
 // compressGzip compresses data using gzip at BestSpeed level.
@@ -1071,7 +1097,7 @@ func compressGzip(data []byte) ([]byte, error) {
 	defer gzipWriterPool.Put(gz)
 
 	if _, err := gz.Write(data); err != nil {
-		gz.Close() //nolint:errcheck
+		_ = gz.Close() // Close error is secondary; write error takes precedence
 		return nil, err
 	}
 	if err := gz.Close(); err != nil {
@@ -1108,6 +1134,10 @@ func withRetry[T any](ctx context.Context, cfg RetryConfig, operation func(ctx c
 	}
 
 	for attempt := 1; attempt <= cfg.MaxAttempts; attempt++ {
+		// Check context before attempting operation to avoid unnecessary work.
+		if err := ctx.Err(); err != nil {
+			return zero, err
+		}
 		result, err := operation(ctx)
 		if err == nil {
 			return result, nil
@@ -1125,10 +1155,12 @@ func withRetry[T any](ctx context.Context, cfg RetryConfig, operation func(ctx c
 			break
 		}
 
+		timer := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return zero, ctx.Err()
-		case <-time.After(backoff):
+		case <-timer.C:
 		}
 
 		backoff = time.Duration(float64(backoff) * cfg.BackoffMultiplier)
