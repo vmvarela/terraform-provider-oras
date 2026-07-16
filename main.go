@@ -18,7 +18,7 @@ func main() {
 	flag.Parse()
 
 	err := providerserver.Serve(context.Background(), internalprovider.New(), providerserver.ServeOpts{
-		Address: "registry.terraform.io/vmvarela/orastate",
+		Address: "registry.terraform.io/vmvarela/oras",
 		Debug:   debug,
 	})
 	if err != nil {
