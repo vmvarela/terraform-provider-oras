@@ -5,7 +5,7 @@ registry — using the ORAS protocol. If your team already runs an OCI registry,
 dedicated state backends and keep state next to your container images.
 
 This is an *experimental* provider implementing Terraform's `statestore.StateStore` plugin
-interface, available in Terraform 1.16 alpha builds. You must set
+interface, available in Terraform 1.17 alpha builds (pinned in `.terraform-version`). You must set
 `TF_ENABLE_PLUGGABLE_STATE_STORAGE=1` at runtime.
 
 ```hcl
@@ -29,12 +29,16 @@ export GHCR_TOKEN=ghp_xxxxxxxxxxxx
 ```hcl
 terraform {
   state_store "oras_oci" {
+    provider = oras
+
     url          = "oci://ghcr.io/myorg/infra-tfstate"
     compression  = true
     lock_ttl     = "15m"
     max_versions = 10
   }
 }
+
+provider "oras" {}
 ```
 
 ```bash
@@ -82,15 +86,17 @@ back to the GitHub Packages API (`delete:packages` scope required).
 **Private registry (Zot):**
 
 ```hcl
-provider "oras" {
-  insecure = true
-}
-
 terraform {
   state_store "oras_oci" {
+    provider = oras
+
     url      = "oci://zot.example.com/infra/production"
     lock_ttl = "5m"
   }
+}
+
+provider "oras" {
+  insecure = true
 }
 ```
 
@@ -104,16 +110,20 @@ terraform workspace new staging
 ```hcl
 terraform {
   state_store "oras_oci" {
+    provider = oras
+
     url          = "oci://ghcr.io/myorg/infra-tfstate"
     max_versions = 5
   }
 }
+
+provider "oras" {}
 ```
 
 ## Limitations
 
-- Requires Terraform 1.16.0-alpha20260513+ and `TF_ENABLE_PLUGGABLE_STATE_STORAGE=1`.
-  The statestore plugin API is experimental and may break across releases.
+- Requires Terraform **1.17.x alpha** (or any Terraform alpha build with pluggable state storage experiments enabled). `TF_ENABLE_PLUGGABLE_STATE_STORAGE=1` is set for convenience but is no longer required in recent alphas.
+  The statestore plugin API is experimental and may break across releases. **Terraform stable releases (including 1.16.0 and 1.17.0 stable) do NOT support pluggable state storage** — it is gated to alpha/dev builds only.
 - GHCR needs a token with `delete:packages` scope for retention to work.
 - No built-in migration tool. Use `terraform state pull` / `terraform state push`
   to move existing state into this provider.
@@ -127,6 +137,8 @@ TF_ORAS_ZOT_TEST=1 make test-zot   # integration: spins Zot via Docker
 make install                        # build + install to ~/.terraform.d/...
 cp .terraformrc.dev ~/.terraformrc  # dev override
 ```
+
+See [`examples/main.tf`](examples/main.tf) for a runnable local example (Zot over plain HTTP).
 
 ## When to use this
 

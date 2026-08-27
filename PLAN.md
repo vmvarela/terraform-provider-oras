@@ -1,7 +1,8 @@
 # Plan: `terraform-provider-oras`
 
 > Plugin experimental de Terraform que implementa `statestore.StateStore` para almacenar
-> `tfstate` en OCI registries, reutilizando la lógica ORAS de `ghoten` como referencia.
+> `tfstate` en OCI registries. El cliente ORAS se portó inicialmente desde el fork `ghoten`
+> (eliminado tras el port).
 
 ---
 
@@ -14,7 +15,7 @@
 | Config API | URL única: `url = "oci://registry/repo"` |
 | Auth | A nivel del `provider` block (insecure, ca_file) |
 | GHCR fallback | Incluido desde el principio |
-| Terraform target | `1.16.0-alpha20260513` (`.terraform-version`) |
+| Terraform target | `1.17.0-alpha20260827` (`.terraform-version`) |
 
 ---
 
@@ -24,10 +25,10 @@
 |---|---|
 | **Fase 1** — Bootstrap (go.mod, main.go, dirs) | 🟢 Completada |
 | **Fase 2** — Provider skeleton (ProviderWithStateStores) | 🟢 Completada |
-| **Fase 3** — ORAS client (portado de ghoten) | 🟢 Completada |
+| **Fase 3** — ORAS client (portado de ghoten, fork ya eliminado) | 🟢 Completada |
 | **Fase 4** — StateStore implementation | 🟢 Completada |
 | **Fase 5** — Testing (unit + Zot integration) | 🟢 Completada |
-| **Fase 6** — Build tooling y setup local | 🔴 Pendiente |
+| **Fase 6** — Build tooling y setup local | 🟢 Completada |
 
 ---
 
@@ -39,21 +40,31 @@ terraform-provider-oras/
 ├── go.mod                           # github.com/vmvarela/terraform-provider-oras
 ├── go.sum
 ├── Makefile
-├── .terraform-version               # 1.16.0-alpha20260513
+├── .terraform-version               # 1.17.0-alpha20260827
 ├── .envrc                           # TF_ENABLE_PLUGGABLE_STATE_STORAGE=1
 ├── .terraformrc.dev                 # Dev overrides para pruebas locales
-├── test.tf                          # state_store "oras_oci"
+├── .goreleaser.yml                  # Release (GoReleaser) en tags v*
+├── skills-lock.json                 # Hashes de skills
+├── examples/
+│   └── main.tf                      # Ejemplo funcional state_store "oras_oci"
+├── .github/workflows/               # ci.yml (build+test+lint), release.yml, ...
 ├── PLAN.md                          # (este archivo)
 ├── internal/
 │   ├── provider/
-│   │   └── provider.go              # Provider + ProviderWithStateStores
+│   │   └── provider.go              # OrasProvider + ProviderWithStateStores
 │   ├── statestore/
 │   │   └── oci.go                   # statestore.StateStore implementation
+│   ├── config/
+│   │   └── config.go                # ProviderData compartido
 │   └── oras/
 │       ├── client.go                # ORAS client (portado de ghoten)
 │       ├── auth.go                  # Resolución de credenciales OCI
-│       └── ghcr.go                  # Fallback GHCR tag deletion
-└── ghoten/                          # (referencia, existente)
+│       ├── ghcr.go                  # Fallback GHCR tag deletion
+│       ├── helper_test.go           # fakeORASRepo in-memory
+│       ├── auth_test.go
+│       ├── client_test.go
+│       ├── ghcr_test.go
+│       └── zot_test.go              # Integración Zot (Docker)
 ```
 
 ---
@@ -63,7 +74,7 @@ terraform-provider-oras/
 ### Archivos a crear
 
 - `go.mod` con dependencias:
-  - `github.com/hashicorp/terraform-plugin-framework` ≥ v1.18
+  - `github.com/hashicorp/terraform-plugin-framework` v1.19.0
   - `oras.land/oras-go/v2`
   - `github.com/opencontainers/go-digest`
   - `github.com/opencontainers/image-spec`
@@ -103,7 +114,8 @@ func (p *OrasProvider) StateStores() []func() statestore.StateStore
 
 ### Fuente de referencia
 
-`ghoten/internal/backend/remote-state/oras/`:
+El cliente se portó desde el fork `ghoten/internal/backend/remote-state/oras/` (fork
+ya eliminado del repo tras el port). Archivos de origen:
 
 | Archivo | Uso |
 |---|---|
@@ -139,7 +151,9 @@ func (c *Client) List(ctx context.Context) ([]string, error)
 | Tipo | Descripción |
 |---|---|
 | `application/vnd.terraform.statefile.v1` | State sin comprimir |
-| `application/vnd.terraform.statefile.v1.gzip` | State comprimido |
+| `application/vnd.terraform.statefile.v1+gzip` | State comprimido |
+| `application/vnd.terraform.state.v1` | Artifact type del state |
+| `application/vnd.terraform.lock.v1` | Artifact type del lock |
 
 ### Archivos a crear
 
@@ -180,20 +194,25 @@ go test -count=1 ./internal/oras/...
 ```hcl
 terraform {
   required_providers {
-    orastate = {
+    oras = {
       source = "vmvarela/oras"
     }
   }
 
+  # state_store referencia el provider por nombre (NO usa bloque anidado)
   state_store "oras_oci" {
-    provider "oras" {
-      insecure = true
-    }
+    provider = oras
+
     url          = "oci://ghcr.io/myorg/infra-state"
     compression  = true
     lock_ttl     = "15m"
     max_versions = 10
   }
+}
+
+# Provider config de nivel superior
+provider "oras" {
+  insecure = true
 }
 ```
 
@@ -205,7 +224,7 @@ terraform {
 
 ```bash
 go build ./...
-# Y el test.tf se puede validar con:
+# Y el examples/main.tf se puede validar con:
 terraform init
 ```
 
@@ -269,19 +288,24 @@ provider_installation {
 }
 ```
 
-### `test.tf` (actualizar)
+### `examples/main.tf` (ejemplo funcional)
 
 ```hcl
 terraform {
   required_providers {
-    orastate = {
+    oras = {
       source = "vmvarela/oras"
     }
   }
 
   state_store "oras_oci" {
-    url = "oci://mi-registry.com/estado"
+    provider = oras
+    url      = "oci://localhost:5001/estado"
   }
+}
+
+provider "oras" {
+  insecure = true
 }
 ```
 
@@ -291,6 +315,13 @@ terraform {
 make build && make test
 # Terraform init funciona con el provider local
 ```
+
+**Verificado e2e** (2026-08-27): Terraform `1.17.0-alpha20260827` + Zot local (HTTP).
+Flujo `init → apply → destroy` funciona; el tag `state-default` se escribe/actualiza en el registry.
+Notas del proveedor tras la prueba:
+- `state_store` usa sintaxis de referencia `provider = oras` + `provider "oras" {}` de nivel superior (no block anidado).
+- `insecure = true` en el provider fuerza `PlainHTTP` para registries `http://` locales (fix en `internal/statestore/oci.go`).
+- `List` ignora 404 `name unknown` (repo sin state) para no romper `init` (fix en `internal/oras/client.go`).
 
 ---
 
@@ -311,7 +342,6 @@ Fase 2 (provider skeleton)  ←→  Fase 3 (ORAS client)
 ## Referencias
 
 - [HashiCorp: State Store Implementation](https://developer.hashicorp.com/terraform/plugin/framework/state-stores/implementation)
-- [ghoten ORAS backend](ghoten/internal/backend/remote-state/oras/) — referencia principal
 - [oras-go v2](https://oras.land/) — librería OCI client
 - [terraform-plugin-framework](https://github.com/hashicorp/terraform-plugin-framework) — v1.18+
-- [Terraform alpha v1.16.0](https://github.com/hashicorp/terraform/tree/v1.16.0-alpha20260513) — estado experimental
+- [Terraform alpha v1.17.0](https://github.com/hashicorp/terraform/tree/v1.17.0-alpha20260827) — estado experimental (PSS es alpha-only; releases estables no lo incluyen)

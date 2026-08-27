@@ -12,9 +12,9 @@ make install           # build + copy to ~/.terraform.d/plugins/.../darwin_arm64
 
 ## Environment
 
-- **Go 1.26**, **Terraform 1.16.0-alpha20260513** (`.terraform-version` via tfenv)
+- **Go 1.26**, **Terraform 1.17.0-alpha20260827** (`.terraform-version` via tfenv)
 - `TF_ENABLE_PLUGGABLE_STATE_STORAGE=1` required at runtime for Terraform to discover the experimental state store
-- Auth: `ORAS_TOKEN`, `GHCR_TOKEN`, or `GITHUB_TOKEN` env vars (checked in that priority order; see `auth.go:214`)
+- Auth: `ORAS_TOKEN`, `GHCR_TOKEN`, or `GITHUB_TOKEN` env vars (checked in that priority order; see `resolveCredentials` in `internal/oras/auth.go`)
 - Dev overrides: symlink or point `.terraformrc.dev` at the repo, then `cp .terraformrc.dev ~/.terraformrc`
 
 ## Test
@@ -32,7 +32,7 @@ TF_ORAS_ZOT_TEST=1 make test-zot   # Zot integration (requires Docker)
 ## Architecture
 
 ```
-main.go → providerserver.Serve → internal/provider/ (OrastateProvider)
+main.go → providerserver.Serve → internal/provider/ (OrasProvider)
                                      │
                                      ├─ ProviderWithStateStores returns OCIStateStore factory
                                      └─ ProviderData flows to Initialize → Configure chain
@@ -49,11 +49,17 @@ internal/config/           → ProviderData shared type
 
 ## Skills loaded
 
-`golang-pro`, `methodical-programming`, `pragmatic-docs` (from `.agents/skills/`)
+`golang-pro`, `methodical-programming`, `pragmatic-docs` (from `.agents/skills/`, pinned via `skills-lock.json`)
+
+## Release / CI
+
+- CI: `.github/workflows/ci.yml` runs `go build ./...` + `go test -race -count=1 ./...` on ubuntu/macos/windows, plus `golangci-lint` v2.12
+- Release: GoReleaser (`.goreleaser.yml`) on tags `v*`, draft prerelease, optional GPG signature
+- Functional example: `examples/main.tf` (Zot local + `insecure` provider)
 
 ## Notes
 
-- `ghoten/` is a reference fork with its own state; do not edit as part of this provider
+- ORAS client was originally ported from the `ghoten` fork; that fork was removed after the port and is no longer part of this repo
 - Provider has zero data sources and zero resources — state-store-only
 - Media types: `application/vnd.terraform.statefile.v1` (plain), `+gzip` (compressed)
 - Default max state size: 256 MiB

@@ -164,14 +164,14 @@ func (s *OCIStateStore) Initialize(ctx context.Context, req fwss.InitializeReque
 	if pd, ok := req.ProviderData.(*config.ProviderData); ok && pd != nil {
 		if pd.HTTPClient != nil {
 			opts = append(opts, oras.WithHTTPClient(pd.HTTPClient))
-		} else {
-			// Fallback to individual settings if HTTPClient not available
-			if pd.Insecure {
-				opts = append(opts, oras.WithInsecure(true))
-			}
-			if pd.CAFile != "" {
-				opts = append(opts, oras.WithCAFile(pd.CAFile))
-			}
+		}
+		// WithInsecure sets repo.PlainHTTP, required for http:// registries
+		// (e.g. local Zot). Must be passed even when a custom HTTPClient exists.
+		if pd.Insecure {
+			opts = append(opts, oras.WithInsecure(true))
+		}
+		if pd.CAFile != "" {
+			opts = append(opts, oras.WithCAFile(pd.CAFile))
 		}
 	}
 

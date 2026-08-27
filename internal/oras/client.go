@@ -970,6 +970,11 @@ func listWorkspacesFromTags(ctx context.Context, repo *orasRepositoryClient) ([]
 		tags = append(tags, page...)
 		return nil
 	}); err != nil {
+		// A repository with no state yet returns 404 (name unknown). Treat that
+		// as an empty workspace list rather than a hard error during init.
+		if isNotFound(err) {
+			return nil, nil
+		}
 		return nil, err
 	}
 
