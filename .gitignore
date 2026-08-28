@@ -10,3 +10,6 @@ terraform-provider-oras
 # Go
 *.test
 *.out
+
+# Deepwork
+.slim/deepwork/

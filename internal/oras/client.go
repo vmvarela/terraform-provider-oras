@@ -65,64 +65,10 @@ const (
 	stateVersionTagSeparator = "-v"
 )
 
-// gzipWriterPool pools gzip.Writer values to reduce per-Put allocations.
-var gzipWriterPool = sync.Pool{
-	New: func() any {
-		gz, _ := gzip.NewWriterLevel(io.Discard, gzip.BestSpeed)
-		return gz
-	},
-}
-
-// gzipBufPool pools bytes.Buffer values used as the destination during compression.
-var gzipBufPool = sync.Pool{
-	New: func() any { return new(bytes.Buffer) },
-}
-
-// gzipReaderPool pools gzip.Reader values to reduce per-Get allocations.
-var gzipReaderPool = sync.Pool{
-	New: func() any {
-		gz, _ := gzip.NewReader(bytes.NewReader(minimalGzipStream))
-		return gz
-	},
-}
-
-// minimalGzipStream is the smallest valid gzip stream used to pre-warm the reader pool.
-var minimalGzipStream = func() []byte {
-	var buf bytes.Buffer
-	gz, _ := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
-	_ = gz.Close()
-	return buf.Bytes()
-}()
-
 // defaultRetentionSem limits concurrent async retention goroutines globally.
 var defaultRetentionSem = make(chan struct{}, 3)
 
 // ─── Exported types ───────────────────────────────────────────────────────────
-
-// RetryConfig defines retry behavior for operations against the OCI registry.
-type RetryConfig struct {
-	MaxAttempts       int
-	InitialBackoff    time.Duration
-	MaxBackoff        time.Duration
-	BackoffMultiplier float64
-}
-
-const (
-	defaultRetryMaxAttempts       = 3
-	defaultRetryInitialBackoff    = time.Second
-	defaultRetryMaxBackoff        = 30 * time.Second
-	defaultRetryBackoffMultiplier = 2.0
-)
-
-// DefaultRetryConfig returns a RetryConfig with sensible defaults.
-func DefaultRetryConfig() RetryConfig {
-	return RetryConfig{
-		MaxAttempts:       defaultRetryMaxAttempts,
-		InitialBackoff:    defaultRetryInitialBackoff,
-		MaxBackoff:        defaultRetryMaxBackoff,
-		BackoffMultiplier: defaultRetryBackoffMultiplier,
-	}
-}
 
 // LockInfo holds information about a state lock.
 type LockInfo struct {
@@ -198,51 +144,23 @@ type fetchedManifest struct {
 // workspaceClient is an internal per-workspace OCI client, equivalent to
 // ghoten's RemoteClient. It is created per operation on Client.
 type workspaceClient struct {
-	repo          *orasRepositoryClient
-	workspaceName string
-	stateTag      string
-	lockTag       string
-	unlockedTag   string
-	retryConfig   RetryConfig
-
-	stateCompression      string
-	stateMaxSize          int64
-	lockTTL               time.Duration
-	versioningMaxVersions int
-
-	now func() time.Time
-
-	// retentionSem and retentionWg are shared from the parent Client.
-	retentionSem chan struct{}
-	retentionWg  *sync.WaitGroup
+	client      *Client
+	stateID     string
+	stateTag    string
+	lockTag     string
+	unlockedTag string
 }
 
 // newWorkspaceClient creates a workspaceClient for the given stateID (workspace name).
 func newWorkspaceClient(c *Client, stateID string) *workspaceClient {
 	wsTag := workspaceTagFor(stateID)
 	return &workspaceClient{
-		repo:                  c.repoClient,
-		workspaceName:         stateID,
-		stateTag:              stateTagPrefix + wsTag,
-		lockTag:               lockTagPrefix + wsTag,
-		unlockedTag:           unlockedTagPrefix + wsTag,
-		retryConfig:           c.config.retryConfig,
-		stateCompression:      c.config.compression,
-		stateMaxSize:          c.config.maxStateSize,
-		lockTTL:               c.config.lockTTL,
-		versioningMaxVersions: c.config.maxVersions,
-		now:                   c.now,
-		retentionSem:          c.retentionSem,
-		retentionWg:           &c.retentionWg,
+		client:      c,
+		stateID:     stateID,
+		stateTag:    stateTagPrefix + wsTag,
+		lockTag:     lockTagPrefix + wsTag,
+		unlockedTag: unlockedTagPrefix + wsTag,
 	}
-}
-
-// nowUTC returns the current UTC time, using the injectable now func.
-func (wc *workspaceClient) nowUTC() time.Time {
-	if wc.now != nil {
-		return wc.now().UTC()
-	}
-	return time.Now().UTC()
 }
 
 // ─── Client ───────────────────────────────────────────────────────────────────
@@ -250,7 +168,7 @@ func (wc *workspaceClient) nowUTC() time.Time {
 // Get retrieves the state for the given stateID. Returns nil if no state exists.
 func (c *Client) Get(ctx context.Context, stateID string) ([]byte, error) {
 	wc := newWorkspaceClient(c, stateID)
-	return withRetry(ctx, wc.retryConfig, func(ctx context.Context) ([]byte, error) {
+	return retryWithResult(ctx, func(ctx context.Context) ([]byte, error) {
 		return wc.get(ctx)
 	})
 }
@@ -272,7 +190,7 @@ func (wc *workspaceClient) get(ctx context.Context) ([]byte, error) {
 	}
 
 	layer := m.Layers[0]
-	rc, err := wc.repo.inner.Fetch(ctx, layer)
+	rc, err := wc.client.repoClient.inner.Fetch(ctx, layer)
 	if err != nil {
 		return nil, err
 	}
@@ -283,21 +201,17 @@ func (wc *workspaceClient) get(ctx context.Context) ([]byte, error) {
 	case mediaTypeStateLayer:
 		// no decompression needed
 	case mediaTypeStateLayerGzip:
-		gz := gzipReaderPool.Get().(*gzip.Reader)
-		if err := gz.Reset(rc); err != nil {
-			gzipReaderPool.Put(gz)
+		gz, err := gzip.NewReader(rc)
+		if err != nil {
 			return nil, err
 		}
-		defer func() {
-			gz.Close() //nolint:errcheck
-			gzipReaderPool.Put(gz)
-		}()
+		defer func() { _ = gz.Close() }()
 		r = gz
 	default:
 		return nil, fmt.Errorf("unsupported state layer media type %q", layer.MediaType)
 	}
 
-	limit := wc.stateMaxSize
+	limit := wc.client.config.MaxStateSize
 	if limit <= 0 {
 		limit = defaultMaxStateSize
 	}
@@ -316,7 +230,7 @@ func (wc *workspaceClient) get(ctx context.Context) ([]byte, error) {
 // Put stores the state for the given stateID.
 func (c *Client) Put(ctx context.Context, stateID string, data []byte) error {
 	wc := newWorkspaceClient(c, stateID)
-	return withRetryNoResult(ctx, wc.retryConfig, func(ctx context.Context) error {
+	return retry(ctx, func(ctx context.Context) error {
 		return wc.put(ctx, data)
 	})
 }
@@ -325,7 +239,7 @@ func (wc *workspaceClient) put(ctx context.Context, state []byte) error {
 	stateToPush := state
 	layerMediaType := mediaTypeStateLayer
 
-	if wc.stateCompression == "gzip" {
+	if wc.client.config.Compression == "gzip" {
 		compressed, err := compressGzip(state)
 		if err != nil {
 			return fmt.Errorf("compressing state: %w", err)
@@ -335,11 +249,11 @@ func (wc *workspaceClient) put(ctx context.Context, state []byte) error {
 	}
 
 	var nextVersion int
-	if wc.versioningMaxVersions > 0 {
+	if wc.client.config.MaxVersions > 0 {
 		nextVersion = wc.currentStateVersion(ctx) + 1
 	}
 
-	layerDesc, err := oras.PushBytes(ctx, wc.repo.inner, layerMediaType, stateToPush)
+	layerDesc, err := oras.PushBytes(ctx, wc.client.repoClient.inner, layerMediaType, stateToPush)
 	if err != nil {
 		return err
 	}
@@ -349,16 +263,16 @@ func (wc *workspaceClient) put(ctx context.Context, state []byte) error {
 		return err
 	}
 
-	if err := wc.repo.inner.Tag(ctx, manifestDesc, wc.stateTag); err != nil {
+	if err := wc.client.repoClient.inner.Tag(ctx, manifestDesc, wc.stateTag); err != nil {
 		return err
 	}
 
-	if wc.versioningMaxVersions <= 0 {
+	if wc.client.config.MaxVersions <= 0 {
 		return nil
 	}
 
 	newVersionTag := wc.versionTagFor(nextVersion)
-	if err := wc.repo.inner.Tag(ctx, manifestDesc, newVersionTag); err != nil {
+	if err := wc.client.repoClient.inner.Tag(ctx, manifestDesc, newVersionTag); err != nil {
 		return err
 	}
 
@@ -367,15 +281,15 @@ func (wc *workspaceClient) put(ctx context.Context, state []byte) error {
 	// these cleanup operations must complete even if the parent context is
 	// cancelled, ensuring version retention limits are enforced regardless
 	// of the calling operation's lifecycle.
-	sem := wc.retentionSem
+	sem := wc.client.retentionSem
 	if sem == nil {
 		sem = defaultRetentionSem
 	}
 	select {
 	case sem <- struct{}{}:
-		wc.retentionWg.Add(1)
+		wc.client.retentionWg.Add(1)
 		go func() {
-			defer wc.retentionWg.Done()
+			defer wc.client.retentionWg.Done()
 			defer func() { <-sem }()
 			asyncCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
@@ -408,20 +322,20 @@ func (wc *workspaceClient) put(ctx context.Context, state []byte) error {
 // Delete removes the state for the given stateID. Returns nil if no state exists.
 func (c *Client) Delete(ctx context.Context, stateID string) error {
 	wc := newWorkspaceClient(c, stateID)
-	return withRetryNoResult(ctx, wc.retryConfig, func(ctx context.Context) error {
+	return retry(ctx, func(ctx context.Context) error {
 		return wc.delete(ctx)
 	})
 }
 
 func (wc *workspaceClient) delete(ctx context.Context) error {
-	desc, err := wc.repo.inner.Resolve(ctx, wc.stateTag)
+	desc, err := wc.client.repoClient.inner.Resolve(ctx, wc.stateTag)
 	if err != nil {
 		if isNotFound(err) {
 			return nil
 		}
 		return err
 	}
-	return wc.repo.inner.Delete(ctx, desc)
+	return wc.client.repoClient.inner.Delete(ctx, desc)
 }
 
 // Lock acquires a lock for the given stateID. Returns the lock ID on success.
@@ -477,8 +391,8 @@ func (wc *workspaceClient) lock(ctx context.Context, info *LockInfo) (string, er
 	}
 
 	leaseExpiry := int64(0)
-	if wc.lockTTL > 0 {
-		leaseExpiry = wc.nowUTC().Add(wc.lockTTL).UnixNano()
+	if wc.client.config.LockTTL > 0 {
+		leaseExpiry = wc.client.nowUTC().Add(wc.client.config.LockTTL).UnixNano()
 	}
 
 	info.Path = wc.stateTag
@@ -492,11 +406,11 @@ func (wc *workspaceClient) lock(ctx context.Context, info *LockInfo) (string, er
 		return "", err
 	}
 
-	err = withRetryNoResult(ctx, wc.retryConfig, func(ctx context.Context) error {
-		return wc.repo.inner.Tag(ctx, manifestDesc, wc.lockTag)
+	err = retry(ctx, func(ctx context.Context) error {
+		return wc.client.repoClient.inner.Tag(ctx, manifestDesc, wc.lockTag)
 	})
 	if err != nil {
-		if _, resolveErr := wc.repo.inner.Resolve(ctx, wc.lockTag); resolveErr == nil {
+		if _, resolveErr := wc.client.repoClient.inner.Resolve(ctx, wc.lockTag); resolveErr == nil {
 			existing, _ := wc.getLockInfo(ctx)
 			return "", &LockError{Info: existing, Err: fmt.Errorf("state is locked")}
 		}
@@ -506,9 +420,9 @@ func (wc *workspaceClient) lock(ctx context.Context, info *LockInfo) (string, er
 	// Post-write verification: ensure we actually hold the lock.
 	verified, verifyErr := wc.getLockManifestData(ctx)
 	if verifyErr != nil {
-		if cleanupDesc, cleanupErr := wc.repo.inner.Resolve(ctx, wc.lockTag); cleanupErr == nil {
+		if cleanupDesc, cleanupErr := wc.client.repoClient.inner.Resolve(ctx, wc.lockTag); cleanupErr == nil {
 			if cleanupDesc.Digest == manifestDesc.Digest {
-				_ = wc.repo.inner.Delete(ctx, cleanupDesc)
+				_ = wc.client.repoClient.inner.Delete(ctx, cleanupDesc)
 			}
 		}
 		return "", &LockError{InconsistentRead: true, Err: fmt.Errorf("failed to verify lock acquisition: %w", verifyErr)}
@@ -547,8 +461,8 @@ func (wc *workspaceClient) unlock(ctx context.Context, id string) error {
 		return fmt.Errorf("lock ID mismatch: held by %q", existing.ID)
 	}
 
-	err = withRetryNoResult(ctx, wc.retryConfig, func(ctx context.Context) error {
-		return wc.repo.inner.Delete(ctx, fm.desc)
+	err = retry(ctx, func(ctx context.Context) error {
+		return wc.client.repoClient.inner.Delete(ctx, fm.desc)
 	})
 	if err == nil {
 		return nil
@@ -575,13 +489,13 @@ func (c *Client) WaitForRetention() {
 
 func (wc *workspaceClient) packStateManifest(ctx context.Context, layers []ocispec.Descriptor, stateVersion int) (ocispec.Descriptor, error) {
 	annotations := map[string]string{
-		annotationWorkspace: wc.workspaceName,
-		annotationUpdatedAt: wc.nowUTC().Format(time.RFC3339Nano),
+		annotationWorkspace: wc.stateID,
+		annotationUpdatedAt: wc.client.nowUTC().Format(time.RFC3339Nano),
 	}
 	if stateVersion > 0 {
 		annotations[annotationStateVersion] = strconv.Itoa(stateVersion)
 	}
-	return oras.PackManifest(ctx, wc.repo.inner, oras.PackManifestVersion1_1, artifactTypeState, oras.PackManifestOptions{
+	return oras.PackManifest(ctx, wc.client.repoClient.inner, oras.PackManifestVersion1_1, artifactTypeState, oras.PackManifestOptions{
 		Layers:              layers,
 		ManifestAnnotations: annotations,
 	})
@@ -598,9 +512,9 @@ func (wc *workspaceClient) packLockManifestWithGeneration(ctx context.Context, i
 		return ocispec.Descriptor{}, fmt.Errorf("failed to marshal lock metadata: %w", err)
 	}
 
-	return oras.PackManifest(ctx, wc.repo.inner, oras.PackManifestVersion1_1, artifactTypeLock, oras.PackManifestOptions{
+	return oras.PackManifest(ctx, wc.client.repoClient.inner, oras.PackManifestVersion1_1, artifactTypeLock, oras.PackManifestOptions{
 		ManifestAnnotations: map[string]string{
-			annotationWorkspace: wc.workspaceName,
+			annotationWorkspace: wc.stateID,
 			annotationLockID:    id,
 			annotationLockInfo:  infoJSON,
 			annotationLockGen:   string(lockDataJSON),
@@ -639,7 +553,7 @@ func (wc *workspaceClient) currentStateVersion(ctx context.Context) int {
 
 func (wc *workspaceClient) listExistingVersions(ctx context.Context) ([]int, error) {
 	var tags []string
-	if err := wc.repo.inner.Tags(ctx, "", func(page []string) error {
+	if err := wc.client.repoClient.inner.Tags(ctx, "", func(page []string) error {
 		tags = append(tags, page...)
 		return nil
 	}); err != nil {
@@ -658,23 +572,23 @@ func (wc *workspaceClient) listExistingVersions(ctx context.Context) ([]int, err
 }
 
 // enforceVersionRetention prunes old state versions, keeping at most
-// wc.versioningMaxVersions versions.
+// wc.client.config.MaxVersions versions.
 //
-// Pre:  wc.versioningMaxVersions > 0; versions contains the list of known
+// Pre:  wc.client.config.MaxVersions > 0; versions contains the list of known
 //       version numbers for this workspace.
-// Post: at most wc.versioningMaxVersions versions remain in the registry;
+// Post: at most wc.client.config.MaxVersions versions remain in the registry;
 //       the current manifest (identified by current.Digest) is never deleted.
 //
 // Loop invariant (over groups): each group processed has its keep-tagged
 // manifests retagged to a new digest before the old digest is deleted.
 // Bounding function: len(groups) - index of processed group.
 func (wc *workspaceClient) enforceVersionRetention(ctx context.Context, current ocispec.Descriptor, versions []int) error {
-	if wc.versioningMaxVersions <= 0 || len(versions) <= wc.versioningMaxVersions {
+	if wc.client.config.MaxVersions <= 0 || len(versions) <= wc.client.config.MaxVersions {
 		return nil
 	}
 
 	sort.Ints(versions)
-	toDeleteCount := len(versions) - wc.versioningMaxVersions
+	toDeleteCount := len(versions) - wc.client.config.MaxVersions
 	deleteVersions := versions[:toDeleteCount]
 	keepVersions := versions[toDeleteCount:]
 
@@ -725,7 +639,7 @@ func (wc *workspaceClient) groupVersionsByDigest(ctx context.Context, versions [
 	for _, v := range versions {
 		tag := wc.versionTagFor(v)
 		g.Go(func() error {
-			desc, err := wc.repo.inner.Resolve(ctx, tag)
+			desc, err := wc.client.repoClient.inner.Resolve(ctx, tag)
 			if err != nil || desc.Digest == currentDigest {
 				return nil //nolint:nilerr
 			}
@@ -785,7 +699,7 @@ func (wc *workspaceClient) retagToNewManifest(ctx context.Context, tags []string
 		return err
 	}
 	for _, tag := range tags {
-		if err := wc.repo.inner.Tag(ctx, newDesc, tag); err != nil {
+		if err := wc.client.repoClient.inner.Tag(ctx, newDesc, tag); err != nil {
 			return err
 		}
 	}
@@ -793,7 +707,7 @@ func (wc *workspaceClient) retagToNewManifest(ctx context.Context, tags []string
 }
 
 func (wc *workspaceClient) deleteDigestWithFallback(ctx context.Context, desc ocispec.Descriptor, fallbackTag string) error {
-	err := wc.repo.inner.Delete(ctx, desc)
+	err := wc.client.repoClient.inner.Delete(ctx, desc)
 	if err == nil || isNotFound(err) {
 		return nil
 	}
@@ -801,7 +715,7 @@ func (wc *workspaceClient) deleteDigestWithFallback(ctx context.Context, desc oc
 		return err
 	}
 
-	ghErr := tryDeleteGHCRTag(ctx, wc.repo, fallbackTag)
+	ghErr := tryDeleteGHCRTag(ctx, wc.client.repoClient, fallbackTag)
 	if errors.Is(ghErr, errNotGHCR) {
 		return fmt.Errorf("registry does not support manifest deletion (HTTP 405) and no alternative deletion method is available for %q", fallbackTag)
 	}
@@ -812,18 +726,18 @@ func (wc *workspaceClient) deleteDigestWithFallback(ctx context.Context, desc oc
 }
 
 func (wc *workspaceClient) isLockStale(data *LockManifestData) bool {
-	if wc.lockTTL <= 0 {
+	if wc.client.config.LockTTL <= 0 {
 		return false
 	}
 	if data == nil || data.LeaseExpiry <= 0 {
 		return false
 	}
-	return wc.nowUTC().UnixNano() > data.LeaseExpiry
+	return wc.client.nowUTC().UnixNano() > data.LeaseExpiry
 }
 
 func (wc *workspaceClient) clearLock(ctx context.Context, desc ocispec.Descriptor) error {
-	err := withRetryNoResult(ctx, wc.retryConfig, func(ctx context.Context) error {
-		return wc.repo.inner.Delete(ctx, desc)
+	err := retry(ctx, func(ctx context.Context) error {
+		return wc.client.repoClient.inner.Delete(ctx, desc)
 	})
 	if err == nil || isNotFound(err) {
 		return nil
@@ -835,25 +749,25 @@ func (wc *workspaceClient) clearLock(ctx context.Context, desc ocispec.Descripto
 }
 
 func (wc *workspaceClient) retagToUnlocked(ctx context.Context) error {
-	desc, err := withRetry(ctx, wc.retryConfig, func(ctx context.Context) (ocispec.Descriptor, error) {
-		return wc.repo.inner.Resolve(ctx, wc.unlockedTag)
+	desc, err := retryWithResult(ctx, func(ctx context.Context) (ocispec.Descriptor, error) {
+		return wc.client.repoClient.inner.Resolve(ctx, wc.unlockedTag)
 	})
 	if isNotFound(err) {
 		desc, err = wc.packLockManifestWithGeneration(ctx, "", "", 0, 0, "")
 		if err != nil {
 			return err
 		}
-		if err := withRetryNoResult(ctx, wc.retryConfig, func(ctx context.Context) error {
-			return wc.repo.inner.Tag(ctx, desc, wc.unlockedTag)
-		}); err != nil {
-			return err
-		}
-	} else if err != nil {
+if err := retry(ctx, func(ctx context.Context) error {
+		return wc.client.repoClient.inner.Tag(ctx, desc, wc.unlockedTag)
+	}); err != nil {
 		return err
 	}
-	return withRetryNoResult(ctx, wc.retryConfig, func(ctx context.Context) error {
-		return wc.repo.inner.Tag(ctx, desc, wc.lockTag)
-	})
+} else if err != nil {
+	return err
+}
+return retry(ctx, func(ctx context.Context) error {
+	return wc.client.repoClient.inner.Tag(ctx, desc, wc.lockTag)
+})
 }
 
 func (wc *workspaceClient) getLockInfo(ctx context.Context) (*LockInfo, error) {
@@ -873,17 +787,17 @@ func (wc *workspaceClient) getLockManifestData(ctx context.Context) (*LockManife
 }
 
 func (wc *workspaceClient) fetchManifestWithDesc(ctx context.Context, reference string) (fetchedManifest, error) {
-	return withRetry(ctx, wc.retryConfig, func(ctx context.Context) (fetchedManifest, error) {
+	return retryWithResult(ctx, func(ctx context.Context) (fetchedManifest, error) {
 		return wc.fetchManifestInternal(ctx, reference)
 	})
 }
 
 func (wc *workspaceClient) fetchManifestInternal(ctx context.Context, reference string) (fetchedManifest, error) {
-	desc, err := wc.repo.inner.Resolve(ctx, reference)
+	desc, err := wc.client.repoClient.inner.Resolve(ctx, reference)
 	if err != nil {
 		return fetchedManifest{}, err
 	}
-	rc, err := wc.repo.inner.Fetch(ctx, desc)
+	rc, err := wc.client.repoClient.inner.Fetch(ctx, desc)
 	if err != nil {
 		return fetchedManifest{}, err
 	}
@@ -970,8 +884,6 @@ func listWorkspacesFromTags(ctx context.Context, repo *orasRepositoryClient) ([]
 		tags = append(tags, page...)
 		return nil
 	}); err != nil {
-		// A repository with no state yet returns 404 (name unknown). Treat that
-		// as an empty workspace list rather than a hard error during init.
 		if isNotFound(err) {
 			return nil, nil
 		}
@@ -983,7 +895,7 @@ func listWorkspacesFromTags(ctx context.Context, repo *orasRepositoryClient) ([]
 		tagSet[t] = struct{}{}
 	}
 
-	var relevantTags []string
+	var out []string
 	for _, tag := range tags {
 		if !strings.HasPrefix(tag, stateTagPrefix) {
 			continue
@@ -993,32 +905,14 @@ func listWorkspacesFromTags(ctx context.Context, repo *orasRepositoryClient) ([]
 				continue
 			}
 		}
-		relevantTags = append(relevantTags, tag)
-	}
-
-	var mu sync.Mutex
-	var out []string
-	g, ctx := errgroup.WithContext(ctx)
-	g.SetLimit(10)
-
-	for _, tag := range relevantTags {
-		g.Go(func() error {
-			name, err := workspaceNameFromTag(ctx, repo, tag)
-			if err != nil {
-				slog.Debug("failed to resolve workspace name", "tag", tag, "error", err)
-				return nil // Continue instead of failing
-			}
-			if name != "" {
-				mu.Lock()
-				out = append(out, name)
-				mu.Unlock()
-			}
-			return nil
-		})
-	}
-
-	if err := g.Wait(); err != nil {
-		return nil, err
+		name, err := workspaceNameFromTag(ctx, repo, tag)
+		if err != nil {
+			slog.Debug("failed to resolve workspace name", "tag", tag, "error", err)
+			continue
+		}
+		if name != "" {
+			out = append(out, name)
+		}
 	}
 
 	sort.Strings(out)
@@ -1060,7 +954,7 @@ func workspaceNameFromTag(ctx context.Context, repo *orasRepositoryClient, state
 	}
 
 	// Use retry for transient errors
-	return withRetry(ctx, DefaultRetryConfig(), func(ctx context.Context) (string, error) {
+	return retryWithResult(ctx, func(ctx context.Context) (string, error) {
 		desc, err := repo.inner.Resolve(ctx, stateTag)
 		if err != nil {
 			return "", err
@@ -1093,53 +987,50 @@ func workspaceNameFromTag(ctx context.Context, repo *orasRepositoryClient, state
 // Post: len(result) > 0; gzip.NewReader(bytes.NewReader(result)) succeeds and
 //       decompressing result reproduces data exactly.
 func compressGzip(data []byte) ([]byte, error) {
-	buf := gzipBufPool.Get().(*bytes.Buffer)
-	buf.Reset()
-	defer gzipBufPool.Put(buf)
-
-	gz := gzipWriterPool.Get().(*gzip.Writer)
-	gz.Reset(buf)
-	defer gzipWriterPool.Put(gz)
-
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
 	if _, err := gz.Write(data); err != nil {
-		_ = gz.Close() // Close error is secondary; write error takes precedence
+		_ = gz.Close()
 		return nil, err
 	}
 	if err := gz.Close(); err != nil {
 		return nil, err
 	}
-	result := make([]byte, buf.Len())
-	copy(result, buf.Bytes())
-	return result, nil
+	return buf.Bytes(), nil
 }
 
 // ─── Retry helpers ────────────────────────────────────────────────────────────
+//
+// Retry runs operation up to 3 times with exponential backoff (1s, 2s, 4s),
+// retrying only on transient errors.
+func retry(ctx context.Context, operation func(context.Context) error) error {
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		lastErr = operation(ctx)
+		if lastErr == nil {
+			return nil
+		}
+		if ctx.Err() != nil || !isTransientError(lastErr) {
+			return lastErr
+		}
+		if attempt < 3 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(attempt) * time.Second):
+			}
+		}
+	}
+	return lastErr
+}
 
-// withRetry executes operation with exponential backoff, retrying only on
-// transient errors.
-//
-// Pre:  ctx is non-nil; operation is non-nil; cfg.MaxAttempts >= 1.
-// Post: returns the first successful result, or the last error after
-//       cfg.MaxAttempts attempts.
-//
-// Loop invariant: 1 <= attempt <= cfg.MaxAttempts; backoff >= cfg.InitialBackoff.
-// Bounding function: cfg.MaxAttempts - attempt, which strictly decreases each
-// iteration and reaches 0 when attempt == cfg.MaxAttempts.
-func withRetry[T any](ctx context.Context, cfg RetryConfig, operation func(ctx context.Context) (T, error)) (T, error) {
+func retryWithResult[T any](ctx context.Context, operation func(context.Context) (T, error)) (T, error) {
 	var zero T
 	var lastErr error
-
-	if cfg.MaxAttempts <= 0 {
-		cfg.MaxAttempts = 1
-	}
-
-	backoff := cfg.InitialBackoff
-	if backoff <= 0 {
-		backoff = time.Second
-	}
-
-	for attempt := 1; attempt <= cfg.MaxAttempts; attempt++ {
-		// Check context before attempting operation to avoid unnecessary work.
+	for attempt := 1; attempt <= 3; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return zero, err
 		}
@@ -1147,41 +1038,19 @@ func withRetry[T any](ctx context.Context, cfg RetryConfig, operation func(ctx c
 		if err == nil {
 			return result, nil
 		}
-
 		lastErr = err
-
-		if ctx.Err() != nil {
-			return zero, ctx.Err()
-		}
-		if !isTransientError(err) {
+		if ctx.Err() != nil || !isTransientError(err) {
 			return zero, err
 		}
-		if attempt == cfg.MaxAttempts {
-			break
-		}
-
-		timer := time.NewTimer(backoff)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return zero, ctx.Err()
-		case <-timer.C:
-		}
-
-		backoff = time.Duration(float64(backoff) * cfg.BackoffMultiplier)
-		if cfg.MaxBackoff > 0 && backoff > cfg.MaxBackoff {
-			backoff = cfg.MaxBackoff
+		if attempt < 3 {
+			select {
+			case <-ctx.Done():
+				return zero, ctx.Err()
+			case <-time.After(time.Duration(attempt) * time.Second):
+			}
 		}
 	}
-
 	return zero, lastErr
-}
-
-func withRetryNoResult(ctx context.Context, cfg RetryConfig, operation func(ctx context.Context) error) error {
-	_, err := withRetry(ctx, cfg, func(ctx context.Context) (struct{}, error) {
-		return struct{}{}, operation(ctx)
-	})
-	return err
 }
 
 func isTransientError(err error) bool {

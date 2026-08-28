@@ -25,15 +25,21 @@ import (
 // newRemoteClient creates a workspaceClient for testing.
 func newRemoteClient(repo *orasRepositoryClient, workspace string) *workspaceClient {
 	wsTag := workspaceTagFor(workspace)
-	wg := &sync.WaitGroup{}
+	client := &Client{
+		repoClient: repo,
+		config: Config{
+			Compression: "none",
+		},
+		now:          time.Now,
+		retentionSem: make(chan struct{}, 3),
+		retentionWg:  sync.WaitGroup{},
+	}
 	return &workspaceClient{
-		repo:          repo,
-		workspaceName: workspace,
-		stateTag:      stateTagPrefix + wsTag,
-		lockTag:       lockTagPrefix + wsTag,
-		unlockedTag:   unlockedTagPrefix + wsTag,
-		retryConfig:   DefaultRetryConfig(),
-		retentionWg:   wg,
+		client:      client,
+		stateID:     workspace,
+		stateTag:    stateTagPrefix + wsTag,
+		lockTag:     lockTagPrefix + wsTag,
+		unlockedTag: unlockedTagPrefix + wsTag,
 	}
 }
 
@@ -41,9 +47,8 @@ func newRemoteClient(repo *orasRepositoryClient, workspace string) *workspaceCli
 func newTestClient(repo *orasRepositoryClient) *Client {
 	return &Client{
 		repoClient: repo,
-		config: clientConfig{
-			compression: "none",
-			retryConfig: DefaultRetryConfig(),
+		config: Config{
+			Compression: "none",
 		},
 		now:          time.Now,
 		retentionSem: make(chan struct{}, 3),
@@ -568,9 +573,22 @@ func TestRemoteClient_Delete_WithVersioning(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakeORASRepo()
 	repo := &orasRepositoryClient{inner: fake}
-	c := newRemoteClient(repo, "default")
-	c.versioningMaxVersions = 2
-	c.retentionSem = make(chan struct{}, 3)
+	client := &Client{
+		repoClient: repo,
+		config: Config{
+			Compression: "none",
+			MaxVersions: 2,
+		},
+		now:          time.Now,
+		retentionSem: make(chan struct{}, 3),
+	}
+	c := &workspaceClient{
+		client:      client,
+		stateID:     "default",
+		stateTag:    stateTagPrefix + "default",
+		lockTag:     lockTagPrefix + "default",
+		unlockedTag: unlockedTagPrefix + "default",
+	}
 
 	// Put several versions.
 	for i := 0; i < 3; i++ {
@@ -578,7 +596,7 @@ func TestRemoteClient_Delete_WithVersioning(t *testing.T) {
 			t.Fatalf("put v%d: %v", i+1, err)
 		}
 	}
-	c.retentionWg.Wait()
+	client.retentionWg.Wait()
 
 	// Now delete the whole workspace.
 	if err := c.delete(ctx); err != nil {
@@ -607,25 +625,38 @@ func TestRemoteClient_Put_VersioningTagsAndRetention(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakeORASRepo()
 	repo := &orasRepositoryClient{inner: fake}
-	c := newRemoteClient(repo, "default")
-	c.versioningMaxVersions = 2
-	c.retentionSem = make(chan struct{}, 3)
+	client := &Client{
+		repoClient: repo,
+		config: Config{
+			Compression: "none",
+			MaxVersions: 2,
+		},
+		now:          time.Now,
+		retentionSem: make(chan struct{}, 3),
+	}
+	c := &workspaceClient{
+		client:      client,
+		stateID:     "default",
+		stateTag:    stateTagPrefix + "default",
+		lockTag:     lockTagPrefix + "default",
+		unlockedTag: unlockedTagPrefix + "default",
+	}
 
 	// Put three states; versioning keeps only the last 2.
 	if err := c.put(ctx, []byte("s1")); err != nil {
 		t.Fatalf("put s1: %v", err)
 	}
-	c.retentionWg.Wait()
+	client.retentionWg.Wait()
 
 	if err := c.put(ctx, []byte("s2")); err != nil {
 		t.Fatalf("put s2: %v", err)
 	}
-	c.retentionWg.Wait()
+	client.retentionWg.Wait()
 
 	if err := c.put(ctx, []byte("s3")); err != nil {
 		t.Fatalf("put s3: %v", err)
 	}
-	c.retentionWg.Wait()
+	client.retentionWg.Wait()
 
 	// Current state should be "s3".
 	p, err := c.get(ctx)
@@ -655,14 +686,27 @@ func TestRemoteClient_RetagToNewManifest_PreservesVersionAnnotation(t *testing.T
 	ctx := context.Background()
 	fake := newFakeORASRepo()
 	repo := &orasRepositoryClient{inner: fake}
-	c := newRemoteClient(repo, "default")
-	c.versioningMaxVersions = 3
-	c.retentionSem = make(chan struct{}, 3)
+	client := &Client{
+		repoClient: repo,
+		config: Config{
+			Compression: "none",
+			MaxVersions: 3,
+		},
+		now:          time.Now,
+		retentionSem: make(chan struct{}, 3),
+	}
+	c := &workspaceClient{
+		client:      client,
+		stateID:     "default",
+		stateTag:    stateTagPrefix + "default",
+		lockTag:     lockTagPrefix + "default",
+		unlockedTag: unlockedTagPrefix + "default",
+	}
 
 	if err := c.put(ctx, []byte("state-data")); err != nil {
 		t.Fatalf("put: %v", err)
 	}
-	c.retentionWg.Wait()
+	c.client.retentionWg.Wait()
 
 	// Fetch the current manifest to check its version annotation.
 	fm, err := c.fetchManifestWithDesc(ctx, c.stateTag)
@@ -675,7 +719,7 @@ func TestRemoteClient_RetagToNewManifest_PreservesVersionAnnotation(t *testing.T
 	if err := c.retagToNewManifest(ctx, []string{c.stateTag}); err != nil {
 		t.Fatalf("retagToNewManifest: %v", err)
 	}
-	c.retentionWg.Wait()
+	c.client.retentionWg.Wait()
 
 	// Re-fetch and verify the version annotation is preserved.
 	fm2, err := c.fetchManifestWithDesc(ctx, c.stateTag)
@@ -694,8 +738,8 @@ func TestAsyncRetentionNotBlocking(t *testing.T) {
 	fake := newFakeORASRepo()
 	repo := &orasRepositoryClient{inner: fake}
 	c := newRemoteClient(repo, "default")
-	c.versioningMaxVersions = 2
-	c.retentionSem = make(chan struct{}, 1)
+	c.client.config.MaxVersions = 2
+	c.client.retentionSem = make(chan struct{}, 1)
 
 	// Put many states; retention is async so puts should not block.
 	for i := 0; i < 5; i++ {
@@ -704,7 +748,7 @@ func TestAsyncRetentionNotBlocking(t *testing.T) {
 		}
 	}
 	// Wait for all retention to finish.
-	c.retentionWg.Wait()
+	c.client.retentionWg.Wait()
 
 	// Final state should be the last one written.
 	p, err := c.get(ctx)
@@ -721,18 +765,18 @@ func TestRetentionCompleteAfterWait(t *testing.T) {
 	fake := newFakeORASRepo()
 	repo := &orasRepositoryClient{inner: fake}
 	c := newRemoteClient(repo, "default")
-	c.versioningMaxVersions = 1
-	c.retentionSem = make(chan struct{}, 3)
+	c.client.config.MaxVersions = 1
+	c.client.retentionSem = make(chan struct{}, 3)
 
 	if err := c.put(ctx, []byte("first")); err != nil {
 		t.Fatalf("put first: %v", err)
 	}
-	c.retentionWg.Wait()
+	c.client.retentionWg.Wait()
 
 	if err := c.put(ctx, []byte("second")); err != nil {
 		t.Fatalf("put second: %v", err)
 	}
-	c.retentionWg.Wait()
+	c.client.retentionWg.Wait()
 
 	// After waiting, only the latest version should remain.
 	_, err := fake.Resolve(ctx, c.versionTagFor(1))
@@ -751,8 +795,8 @@ func TestRetentionRaceWithoutWait(t *testing.T) {
 	fake := newFakeORASRepo()
 	repo := &orasRepositoryClient{inner: fake}
 	c := newRemoteClient(repo, "default")
-	c.versioningMaxVersions = 1
-	c.retentionSem = make(chan struct{}, 3)
+	c.client.config.MaxVersions = 1
+	c.client.retentionSem = make(chan struct{}, 3)
 
 	if err := c.put(ctx, []byte("data")); err != nil {
 		t.Fatalf("put: %v", err)
@@ -772,8 +816,8 @@ func TestWaitForRetentionIsIdempotent(t *testing.T) {
 	fake := newFakeORASRepo()
 	repo := &orasRepositoryClient{inner: fake}
 	c := newRemoteClient(repo, "default")
-	c.versioningMaxVersions = 1
-	c.retentionSem = make(chan struct{}, 3)
+	c.client.config.MaxVersions = 1
+	c.client.retentionSem = make(chan struct{}, 3)
 
 	if err := c.put(ctx, []byte("data")); err != nil {
 		t.Fatalf("put: %v", err)
@@ -781,9 +825,9 @@ func TestWaitForRetentionIsIdempotent(t *testing.T) {
 
 	// Wait multiple times - should be safe (WaitGroup wait is idempotent
 	// when no goroutines are running).
-	c.retentionWg.Wait()
-	c.retentionWg.Wait()
-	c.retentionWg.Wait()
+	c.client.retentionWg.Wait()
+	c.client.retentionWg.Wait()
+	c.client.retentionWg.Wait()
 
 	// Verify no panic and state is accessible.
 	p, err := c.get(ctx)
@@ -834,7 +878,7 @@ func TestRemoteClient_StateCompression_GzipRoundTrip(t *testing.T) {
 	fake := newFakeORASRepo()
 	repo := &orasRepositoryClient{inner: fake}
 	c := newRemoteClient(repo, "default")
-	c.stateCompression = "gzip"
+	c.client.config.Compression = "gzip"
 
 	original := []byte("some state data to compress and decompress")
 	if err := c.put(ctx, original); err != nil {
@@ -870,7 +914,7 @@ func TestRemoteClient_StateCompression_AutoDetectOnRead(t *testing.T) {
 	fake := newFakeORASRepo()
 	repo := &orasRepositoryClient{inner: fake}
 	c := newRemoteClient(repo, "default")
-	c.stateCompression = "none"
+	c.client.config.Compression = "none"
 
 	original := []byte("data stored without compression")
 	if err := c.put(ctx, original); err != nil {
@@ -904,7 +948,7 @@ func TestRemoteClient_StateCompression_GzipEmptyState(t *testing.T) {
 	fake := newFakeORASRepo()
 	repo := &orasRepositoryClient{inner: fake}
 	c := newRemoteClient(repo, "default")
-	c.stateCompression = "gzip"
+	c.client.config.Compression = "gzip"
 
 	if err := c.put(ctx, []byte{}); err != nil {
 		t.Fatalf("put empty with gzip: %v", err)
@@ -926,7 +970,7 @@ func TestRemoteClient_Get_RejectsOversizedState(t *testing.T) {
 	fake := newFakeORASRepo()
 	repo := &orasRepositoryClient{inner: fake}
 	c := newRemoteClient(repo, "default")
-	c.stateMaxSize = 10
+	c.client.config.MaxStateSize = 10
 
 	// Put state that is larger than the limit.
 	if err := c.put(ctx, []byte("this state data is longer than ten bytes")); err != nil {
@@ -947,8 +991,8 @@ func TestRemoteClient_Get_RejectsOversizedGzipState(t *testing.T) {
 	fake := newFakeORASRepo()
 	repo := &orasRepositoryClient{inner: fake}
 	c := newRemoteClient(repo, "default")
-	c.stateCompression = "gzip"
-	c.stateMaxSize = 10
+	c.client.config.Compression = "gzip"
+	c.client.config.MaxStateSize = 10
 
 	data := []byte("this state data is compressed but longer than ten bytes uncompressed")
 	if err := c.put(ctx, data); err != nil {
@@ -978,8 +1022,8 @@ func TestRemoteClient_LockTTL_ClearsStaleLock(t *testing.T) {
 	}
 
 	c := newRemoteClient(repo, "default")
-	c.lockTTL = 5 * time.Minute
-	c.now = nowFunc
+	c.client.config.LockTTL = 5 * time.Minute
+	c.client.now = nowFunc
 
 	info := &LockInfo{
 		ID:        "stale-lock",
@@ -997,8 +1041,8 @@ func TestRemoteClient_LockTTL_ClearsStaleLock(t *testing.T) {
 	}
 
 	// Fast forward past the TTL.
-	nowFuture := pastTime.Add(c.lockTTL + time.Second)
-	c.now = func() time.Time { return nowFuture }
+	nowFuture := pastTime.Add(c.client.config.LockTTL + time.Second)
+	c.client.now = func() time.Time { return nowFuture }
 
 	// A new lock attempt should succeed (stale lock is cleared).
 	info2 := &LockInfo{
@@ -1029,8 +1073,8 @@ func TestRemoteClient_LockTTL_ClearsStaleLock_DeleteUnsupportedFallback(t *testi
 	nowFunc := func() time.Time { return pastTime }
 
 	c := newRemoteClient(repo, "default")
-	c.lockTTL = 5 * time.Minute
-	c.now = nowFunc
+	c.client.config.LockTTL = 5 * time.Minute
+	c.client.now = nowFunc
 
 	info := &LockInfo{
 		ID:        "stale-lock",
@@ -1046,7 +1090,7 @@ func TestRemoteClient_LockTTL_ClearsStaleLock_DeleteUnsupportedFallback(t *testi
 	}
 
 	// Fast forward past TTL.
-	c.now = func() time.Time { return pastTime.Add(c.lockTTL + time.Second) }
+	c.client.now = func() time.Time { return pastTime.Add(c.client.config.LockTTL + time.Second) }
 
 	info2 := &LockInfo{
 		ID:        "new-lock",
@@ -1054,7 +1098,7 @@ func TestRemoteClient_LockTTL_ClearsStaleLock_DeleteUnsupportedFallback(t *testi
 		Info:      "new lock after stale",
 		Who:       "new-user",
 		Version:   "2.0",
-		Created:   c.now(),
+		Created:   c.client.now(),
 	}
 	lockID2, err := c.lock(ctx, info2)
 	if err != nil {
@@ -1194,13 +1238,13 @@ func TestStaleLockCleanupRaceCondition(t *testing.T) {
 
 	pastTime := time.Now().Add(-10 * time.Minute)
 	c := newRemoteClient(repo, "default")
-	c.lockTTL = 5 * time.Minute
-	c.now = func() time.Time { return pastTime }
+	c.client.config.LockTTL = 5 * time.Minute
+	c.client.now = func() time.Time { return pastTime }
 
 	// Create a stale lock manually using packLockManifestWithGeneration.
 	staleInfo := &LockInfo{ID: "crashed-process", Operation: "apply", Created: pastTime}
 	staleInfoBytes, _ := json.Marshal(staleInfo)
-	leaseExpiry := pastTime.Add(c.lockTTL).UnixNano()
+	leaseExpiry := pastTime.Add(c.client.config.LockTTL).UnixNano()
 	manifestDesc, err := c.packLockManifestWithGeneration(ctx, staleInfo.ID, string(staleInfoBytes), 5, leaseExpiry, staleInfo.ID)
 	if err != nil {
 		t.Fatalf("packLockManifestWithGeneration: %v", err)
@@ -1210,10 +1254,10 @@ func TestStaleLockCleanupRaceCondition(t *testing.T) {
 	}
 
 	// Fast-forward past TTL.
-	c.now = func() time.Time { return pastTime.Add(c.lockTTL + time.Second) }
+	c.client.now = func() time.Time { return pastTime.Add(c.client.config.LockTTL + time.Second) }
 
 	// A new lock should succeed (it detects and clears the stale lock).
-	info := &LockInfo{ID: "new-process", Operation: "apply", Who: "new-user", Version: "2.0", Created: c.now()}
+	info := &LockInfo{ID: "new-process", Operation: "apply", Who: "new-user", Version: "2.0", Created: c.client.now()}
 	lockID, err := c.lock(ctx, info)
 	if err != nil {
 		t.Fatalf("expected lock to succeed after stale lock cleanup, got: %v", err)
@@ -1355,7 +1399,7 @@ func TestGroupVersionsByDigest_parallelResolution(t *testing.T) {
 	trackingRepo := newConcurrencyTrackingRepo(fake)
 	repo := &orasRepositoryClient{inner: trackingRepo}
 	c := newRemoteClient(repo, "default")
-	c.versioningMaxVersions = 5
+	c.client.config.MaxVersions = 5
 
 	// Put 5 states so version tags are created.
 	for i := 1; i <= 5; i++ {
@@ -1363,7 +1407,7 @@ func TestGroupVersionsByDigest_parallelResolution(t *testing.T) {
 			t.Fatalf("put %d: %v", i, err)
 		}
 	}
-	c.retentionWg.Wait()
+	c.client.retentionWg.Wait()
 
 	versions := []int{1, 2, 3, 4, 5}
 	// Resolve current state to get its digest.
@@ -1401,14 +1445,14 @@ func TestGroupVersionsByDigest_skipsCurrentDigest(t *testing.T) {
 	fake := newFakeORASRepo()
 	repo := &orasRepositoryClient{inner: fake}
 	c := newRemoteClient(repo, "default")
-	c.versioningMaxVersions = 3
+	c.client.config.MaxVersions = 3
 
 	for i := 1; i <= 3; i++ {
 		if err := c.put(ctx, []byte(fmt.Sprintf("state-%d", i))); err != nil {
 			t.Fatalf("put %d: %v", i, err)
 		}
 	}
-	c.retentionWg.Wait()
+	c.client.retentionWg.Wait()
 
 	fm, err := c.fetchManifestWithDesc(ctx, c.stateTag)
 	if err != nil {
@@ -1463,12 +1507,11 @@ func TestIsTransientError(t *testing.T) {
 	}
 }
 
-func TestWithRetry_Success(t *testing.T) {
+func TestRetry_Success(t *testing.T) {
 	ctx := context.Background()
-	cfg := DefaultRetryConfig()
 
 	callCount := 0
-	result, err := withRetry(ctx, cfg, func(ctx context.Context) (string, error) {
+	result, err := retryWithResult(ctx, func(ctx context.Context) (string, error) {
 		callCount++
 		return "success", nil
 	})
@@ -1483,12 +1526,11 @@ func TestWithRetry_Success(t *testing.T) {
 	}
 }
 
-func TestWithRetry_TransientFailureThenSuccess(t *testing.T) {
+func TestRetry_TransientFailureThenSuccess(t *testing.T) {
 	ctx := context.Background()
-	cfg := DefaultRetryConfig()
 
 	callCount := 0
-	result, err := withRetry(ctx, cfg, func(ctx context.Context) (string, error) {
+	result, err := retryWithResult(ctx, func(ctx context.Context) (string, error) {
 		callCount++
 		if callCount < 2 {
 			return "", &orasErrcode.ErrorResponse{StatusCode: http.StatusTooManyRequests}
@@ -1506,12 +1548,11 @@ func TestWithRetry_TransientFailureThenSuccess(t *testing.T) {
 	}
 }
 
-func TestWithRetry_NonTransientFailure(t *testing.T) {
+func TestRetry_NonTransientFailure(t *testing.T) {
 	ctx := context.Background()
-	cfg := DefaultRetryConfig()
 
 	callCount := 0
-	_, err := withRetry(ctx, cfg, func(ctx context.Context) (string, error) {
+	_, err := retryWithResult(ctx, func(ctx context.Context) (string, error) {
 		callCount++
 		return "", errors.New("non-transient error")
 	})
@@ -1523,17 +1564,11 @@ func TestWithRetry_NonTransientFailure(t *testing.T) {
 	}
 }
 
-func TestWithRetry_MaxAttemptsExhausted(t *testing.T) {
+func TestRetry_MaxAttemptsExhausted(t *testing.T) {
 	ctx := context.Background()
-	cfg := RetryConfig{
-		MaxAttempts:       3,
-		InitialBackoff:    time.Millisecond,
-		MaxBackoff:        time.Millisecond,
-		BackoffMultiplier: 1.0,
-	}
 
 	callCount := 0
-	_, err := withRetry(ctx, cfg, func(ctx context.Context) (string, error) {
+	_, err := retryWithResult(ctx, func(ctx context.Context) (string, error) {
 		callCount++
 		return "", &orasErrcode.ErrorResponse{StatusCode: http.StatusTooManyRequests}
 	})
@@ -1545,19 +1580,13 @@ func TestWithRetry_MaxAttemptsExhausted(t *testing.T) {
 	}
 }
 
-func TestWithRetry_ContextCancellation(t *testing.T) {
+func TestRetry_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	cfg := RetryConfig{
-		MaxAttempts:       5,
-		InitialBackoff:    100 * time.Millisecond,
-		MaxBackoff:        100 * time.Millisecond,
-		BackoffMultiplier: 1.0,
-	}
 
 	callCount := 0
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := withRetry(ctx, cfg, func(ctx context.Context) (string, error) {
+		_, err := retryWithResult(ctx, func(ctx context.Context) (string, error) {
 			callCount++
 			return "", &orasErrcode.ErrorResponse{StatusCode: http.StatusTooManyRequests}
 		})
@@ -1577,12 +1606,11 @@ func TestWithRetry_ContextCancellation(t *testing.T) {
 	}
 }
 
-func TestWithRetryNoResult(t *testing.T) {
+func TestRetryNoResult(t *testing.T) {
 	ctx := context.Background()
-	cfg := DefaultRetryConfig()
 
 	callCount := 0
-	err := withRetryNoResult(ctx, cfg, func(ctx context.Context) error {
+	err := retry(ctx, func(ctx context.Context) error {
 		callCount++
 		if callCount < 2 {
 			return &orasErrcode.ErrorResponse{StatusCode: http.StatusTooManyRequests}

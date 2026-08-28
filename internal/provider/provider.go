@@ -6,10 +6,7 @@ package provider
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"fmt"
-	"net/http"
 	"os"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
@@ -20,7 +17,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/statestore"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
-	"github.com/vmvarela/terraform-provider-oras/internal/config"
+	"github.com/vmvarela/terraform-provider-oras/internal/httputil"
+	"github.com/vmvarela/terraform-provider-oras/internal/providerdata"
 	ocistatestore "github.com/vmvarela/terraform-provider-oras/internal/statestore"
 )
 
@@ -33,7 +31,7 @@ var (
 
 // ProviderData holds provider-level configuration forwarded to state stores
 // via ConfigureResponse.StateStoreData.
-type ProviderData = config.ProviderData
+type ProviderData = providerdata.ProviderData
 
 // OrasProvider implements provider.Provider and provider.ProviderWithStateStores.
 type OrasProvider struct{}
@@ -115,7 +113,7 @@ func (p *OrasProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 		caFile = cfg.CAFile.ValueString()
 	}
 
-	httpClient, err := newHTTPClient(insecure, caFile)
+	httpClient, err := httputil.BuildHTTPClient(insecure, caFile)
 	if err != nil {
 		resp.Diagnostics.AddError("Failed to create HTTP client", err.Error())
 		return
@@ -144,34 +142,4 @@ func (p *OrasProvider) StateStores(_ context.Context) []func() statestore.StateS
 	return []func() statestore.StateStore{
 		ocistatestore.New(),
 	}
-}
-
-// newHTTPClient constructs an *http.Client with the specified TLS settings.
-// When insecure is true, certificate verification is disabled.
-// When caFile is non-empty, it is loaded as the trusted CA pool.
-func newHTTPClient(insecure bool, caFile string) (*http.Client, error) {
-	base, ok := http.DefaultTransport.(*http.Transport)
-	if !ok {
-		return nil, fmt.Errorf("unexpected type for http.DefaultTransport")
-	}
-	t := base.Clone()
-
-	if t.TLSClientConfig == nil {
-		t.TLSClientConfig = &tls.Config{} //nolint:gosec
-	}
-	t.TLSClientConfig.InsecureSkipVerify = insecure //nolint:gosec // intentional per user config
-
-	if caFile != "" {
-		pem, err := os.ReadFile(caFile)
-		if err != nil {
-			return nil, fmt.Errorf("reading ca_file %q: %w", caFile, err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("ca_file %q: no valid PEM certificates found", caFile)
-		}
-		t.TLSClientConfig.RootCAs = pool
-	}
-
-	return &http.Client{Transport: t}, nil
 }

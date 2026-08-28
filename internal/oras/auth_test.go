@@ -1,3 +1,4 @@
+// Package oras provides OCI registry operations for the Terraform state backend.
 package oras
 
 import (
@@ -10,12 +11,13 @@ import (
 	"io"
 	"math/big"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vmvarela/terraform-provider-oras/internal/httputil"
 )
 
 // headerCapturingRoundTripper captures the request and returns a 200 response.
@@ -138,34 +140,19 @@ func TestUserAgentRoundTripper_SetsUserAgent(t *testing.T) {
 	}
 }
 
-func TestNewORASHTTPClient(t *testing.T) {
+func TestBuildHTTPClient(t *testing.T) {
 	t.Run("default client", func(t *testing.T) {
-		// Version is configurable at build time; set it to a known value for
-		// this test to verify the userAgent() function picks it up.
-		origVersion := Version
-		Version = "1.0"
-		t.Cleanup(func() { Version = origVersion })
-
-		client, err := newORASHTTPClient(false, "")
+		client, err := httputil.BuildHTTPClient(false, "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if client == nil {
 			t.Fatal("client is nil")
-		}
-
-		// Check that the transport is a userAgentRoundTripper.
-		rt, ok := client.Transport.(*userAgentRoundTripper)
-		if !ok {
-			t.Fatalf("transport is %T, want *userAgentRoundTripper", client.Transport)
-		}
-		if rt.userAgent != "terraform-provider-oras/1.0" {
-			t.Errorf("userAgent = %q, want %q", rt.userAgent, "terraform-provider-oras/1.0")
 		}
 	})
 
 	t.Run("insecure client", func(t *testing.T) {
-		client, err := newORASHTTPClient(true, "")
+		client, err := httputil.BuildHTTPClient(true, "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -173,19 +160,10 @@ func TestNewORASHTTPClient(t *testing.T) {
 			t.Fatal("client is nil")
 		}
 
-		// Verify that the transport disables TLS verification by making a
-		// real request to a TLS server.
-		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-		}))
-		t.Cleanup(server.Close)
-
-		// Override the transport to point to the test server. We just want
-		// to verify TLS verification is skipped.
-		rt := client.Transport.(*userAgentRoundTripper)
-		transport, ok := rt.next.(*http.Transport)
+		// Verify that the transport disables TLS verification
+		transport, ok := client.Transport.(*http.Transport)
 		if !ok {
-			t.Fatalf("inner transport is %T, want *http.Transport", rt.next)
+			t.Fatalf("transport is %T, want *http.Transport", client.Transport)
 		}
 		if transport.TLSClientConfig == nil {
 			t.Fatal("TLSClientConfig is nil, expected non-nil with InsecureSkipVerify=true")
@@ -199,7 +177,7 @@ func TestNewORASHTTPClient(t *testing.T) {
 		caCert := generateCACert(t)
 		caFile := writeTempFile(t, caCert)
 
-		client, err := newORASHTTPClient(false, caFile)
+		client, err := httputil.BuildHTTPClient(false, caFile)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -209,24 +187,52 @@ func TestNewORASHTTPClient(t *testing.T) {
 	})
 
 	t.Run("with non-existent CA file", func(t *testing.T) {
-		_, err := newORASHTTPClient(false, "/nonexistent/ca.pem")
+		_, err := httputil.BuildHTTPClient(false, "/nonexistent/ca.pem")
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
-		if !strings.Contains(err.Error(), "failed to read CA file") {
-			t.Errorf("error message does not contain %q: %v", "failed to read CA file", err)
+		if !strings.Contains(err.Error(), "reading ca_file") {
+			t.Errorf("error message does not contain %q: %v", "reading ca_file", err)
 		}
 	})
 
 	t.Run("with invalid PEM in CA file", func(t *testing.T) {
 		caFile := writeTempFile(t, []byte("not a valid PEM certificate"))
 
-		_, err := newORASHTTPClient(false, caFile)
+		_, err := httputil.BuildHTTPClient(false, caFile)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
-		if !strings.Contains(err.Error(), "failed to parse any valid certificates from CA file") {
-			t.Errorf("error message does not contain %q: %v", "failed to parse any valid certificates from CA file", err)
+		if !strings.Contains(err.Error(), "no valid PEM certificates found") {
+			t.Errorf("error message does not contain %q: %v", "no valid PEM certificates found", err)
 		}
 	})
+}
+
+func TestHTTPClientWithUserAgent(t *testing.T) {
+	// Test the full chain: httputil.BuildHTTPClient + userAgentRoundTripper
+	origVersion := Version
+	Version = "1.0"
+	t.Cleanup(func() { Version = origVersion })
+
+	baseClient, err := httputil.BuildHTTPClient(false, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	client := &http.Client{
+		Transport: &userAgentRoundTripper{
+			next:      baseClient.Transport,
+			userAgent: userAgent(),
+		},
+	}
+
+	// Check that the transport is a userAgentRoundTripper.
+	rt, ok := client.Transport.(*userAgentRoundTripper)
+	if !ok {
+		t.Fatalf("transport is %T, want *userAgentRoundTripper", client.Transport)
+	}
+	if rt.userAgent != "terraform-provider-oras/1.0" {
+		t.Errorf("userAgent = %q, want %q", rt.userAgent, "terraform-provider-oras/1.0")
+	}
 }

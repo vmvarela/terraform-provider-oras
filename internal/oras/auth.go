@@ -3,8 +3,6 @@ package oras
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vmvarela/terraform-provider-oras/internal/httputil"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	orasRemote "oras.land/oras-go/v2/registry/remote"
 	orasAuth "oras.land/oras-go/v2/registry/remote/auth"
@@ -26,109 +25,36 @@ func userAgent() string {
 	return "terraform-provider-oras/" + Version
 }
 
+// Config holds all configurable options for the ORAS client.
+type Config struct {
+	Insecure     bool
+	CAFile       string
+	Username     string
+	Password     string
+	Token        string
+	Compression  string // "none" or "gzip"
+	LockTTL      time.Duration
+	MaxVersions  int
+	MaxStateSize int64
+	HTTPClient   *http.Client
+}
+
 // Client is the top-level ORAS client that holds the shared OCI repository
 // client and configuration for state operations.
 type Client struct {
 	repoClient   *orasRepositoryClient
-	config       clientConfig
+	config       Config
 	now          func() time.Time // injectable for testing
 	retentionSem chan struct{}
 	retentionWg  sync.WaitGroup
 }
 
-// clientConfig holds all configurable options for the ORAS client.
-type clientConfig struct {
-	insecure    bool
-	caFile      string
-	username    string
-	password    string
-	token       string
-	compression string // "none" or "gzip"
-	lockTTL     time.Duration
-	maxVersions int
-	maxStateSize int64
-	retryConfig RetryConfig
-	httpClient  *http.Client
-}
-
-// Option configures a Client.
-type Option func(*clientConfig)
-
-// WithInsecure configures whether to use plain HTTP instead of HTTPS.
-func WithInsecure(insecure bool) Option {
-	return func(c *clientConfig) {
-		c.insecure = insecure
+// nowUTC returns the current UTC time, using the injectable now func.
+func (c *Client) nowUTC() time.Time {
+	if c.now != nil {
+		return c.now().UTC()
 	}
-}
-
-// WithCAFile sets a custom CA certificate file for TLS verification.
-func WithCAFile(caFile string) Option {
-	return func(c *clientConfig) {
-		c.caFile = caFile
-	}
-}
-
-// WithCredentials sets explicit username and password for registry authentication.
-func WithCredentials(username, password string) Option {
-	return func(c *clientConfig) {
-		c.username = username
-		c.password = password
-	}
-}
-
-// WithToken sets a bearer access token for registry authentication.
-func WithToken(token string) Option {
-	return func(c *clientConfig) {
-		c.token = token
-	}
-}
-
-// WithCompression enables or disables compression for state data.
-// When enabled (true), "gzip" compression is used; when disabled (false), "none" is used.
-func WithCompression(enabled bool) Option {
-	return func(c *clientConfig) {
-		if enabled {
-			c.compression = "gzip"
-		} else {
-			c.compression = "none"
-		}
-	}
-}
-
-// WithLockTTL sets the TTL for state locks.
-func WithLockTTL(ttl time.Duration) Option {
-	return func(c *clientConfig) {
-		c.lockTTL = ttl
-	}
-}
-
-// WithMaxVersions sets the maximum number of state versions to retain.
-func WithMaxVersions(n int) Option {
-	return func(c *clientConfig) {
-		c.maxVersions = n
-	}
-}
-
-// WithMaxStateSize sets the maximum allowed state size in bytes.
-func WithMaxStateSize(n int64) Option {
-	return func(c *clientConfig) {
-		c.maxStateSize = n
-	}
-}
-
-// WithRetryConfig sets a custom retry configuration for HTTP operations.
-func WithRetryConfig(cfg RetryConfig) Option {
-	return func(c *clientConfig) {
-		c.retryConfig = cfg
-	}
-}
-
-// WithHTTPClient sets a custom HTTP client for registry operations.
-// When set, this client is used instead of building one from insecure/caFile settings.
-func WithHTTPClient(client *http.Client) Option {
-	return func(c *clientConfig) {
-		c.httpClient = client
-	}
+	return time.Now().UTC()
 }
 
 // orasRepository is the minimal interface for OCI repository operations
@@ -151,26 +77,15 @@ type orasRepositoryClient struct {
 	httpClient *http.Client
 }
 
-// accessTokenForHost returns the access token for the given host.
-// The host parameter is accepted for future use but currently ignored;
-// the stored token is returned directly.
-// Used by ghcr.go for GitHub API calls.
-func (r *orasRepositoryClient) accessTokenForHost(_ context.Context, host string) (string, error) {
+// accessToken returns the access token for GHCR API calls.
+func (r *orasRepositoryClient) accessToken(_ context.Context) (string, error) {
 	return r.token, nil
 }
 
 // NewClient creates an ORAS client for the given registry and repository.
 // The registry parameter is the registry host (e.g. "ghcr.io" or "registry.example.com:5000").
 // The repository parameter is the repository name (e.g. "myorg/infra-state").
-func NewClient(registry, repository string, opts ...Option) (*Client, error) {
-	cfg := clientConfig{
-		compression: "none",
-		retryConfig: DefaultRetryConfig(),
-	}
-	for _, opt := range opts {
-		opt(&cfg)
-	}
-
+func NewClient(registry, repository string, cfg Config) (*Client, error) {
 	fullRef := registry + "/" + repository
 
 	repoClient, err := newORASRepositoryClient(registry, repository, cfg)
@@ -190,7 +105,7 @@ func NewClient(registry, repository string, opts ...Option) (*Client, error) {
 
 // newORASRepositoryClient creates the underlying ORAS repository client with
 // the given configuration.
-func newORASRepositoryClient(registry, repository string, cfg clientConfig) (*orasRepositoryClient, error) {
+func newORASRepositoryClient(registry, repository string, cfg Config) (*orasRepositoryClient, error) {
 	fullRef := registry + "/" + repository
 
 	repo, err := orasRemote.NewRepository(fullRef)
@@ -198,18 +113,25 @@ func newORASRepositoryClient(registry, repository string, cfg clientConfig) (*or
 		return nil, fmt.Errorf("failed to create remote repository: %w", err)
 	}
 
-	if cfg.insecure {
+	if cfg.Insecure {
 		repo.PlainHTTP = true
 	}
 
 	// Use provided HTTP client if set, otherwise build one
 	var httpClient *http.Client
-	if cfg.httpClient != nil {
-		httpClient = cfg.httpClient
+	if cfg.HTTPClient != nil {
+		httpClient = cfg.HTTPClient
 	} else {
-		httpClient, err = newORASHTTPClient(cfg.insecure, cfg.caFile)
+		httpClient, err = httputil.BuildHTTPClient(cfg.Insecure, cfg.CAFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create HTTP client: %w", err)
+		}
+		// Add User-Agent header for ORAS registry operations
+		httpClient = &http.Client{
+			Transport: &userAgentRoundTripper{
+				next:      httpClient.Transport,
+				userAgent: userAgent(),
+			},
 		}
 	}
 
@@ -235,8 +157,8 @@ func newORASRepositoryClient(registry, repository string, cfg clientConfig) (*or
 // resolveCredentials builds a credential function using the following priority:
 //
 // Credential Resolution Order:
-//  1. Explicit token from cfg.token (set via WithToken option)
-//  2. Explicit username/password from cfg.username/cfg.password (set via WithCredentials option)
+//  1. Explicit token from cfg.Token (set via Config.Token)
+//  2. Explicit username/password from cfg.Username/cfg.Password (set via Config.Username/Config.Password)
 //  3. ORAS_TOKEN environment variable (applies to any registry)
 //  4. For ghcr.io only:
 //     a. GHCR_TOKEN environment variable
@@ -251,19 +173,19 @@ func newORASRepositoryClient(registry, repository string, cfg clientConfig) (*or
 // Pre:  registry is a non-empty hostname string.
 // Post: returns a non-nil CredentialFunc; the returned token is non-empty only
 //       when an access token was resolved (cases 1, 3, 4a, 4b above).
-func resolveCredentials(registry string, cfg clientConfig) (orasAuth.CredentialFunc, string) {
+func resolveCredentials(registry string, cfg Config) (orasAuth.CredentialFunc, string) {
 	// Priority 1: Explicit token
-	if cfg.token != "" {
+	if cfg.Token != "" {
 		return orasAuth.StaticCredential(registry, orasAuth.Credential{
-			AccessToken: cfg.token,
-		}), cfg.token
+			AccessToken: cfg.Token,
+		}), cfg.Token
 	}
 
 	// Priority 2: Explicit username/password
-	if cfg.username != "" || cfg.password != "" {
+	if cfg.Username != "" || cfg.Password != "" {
 		return orasAuth.StaticCredential(registry, orasAuth.Credential{
-			Username: cfg.username,
-			Password: cfg.password,
+			Username: cfg.Username,
+			Password: cfg.Password,
 		}), ""
 	}
 
@@ -291,58 +213,6 @@ func resolveCredentials(registry string, cfg clientConfig) (orasAuth.CredentialF
 
 	// Fall back to anonymous access
 	return orasAuth.StaticCredential(registry, orasAuth.EmptyCredential), ""
-}
-
-// newORASHTTPClient builds an HTTP client configured for OCI registry access.
-// It configures TLS settings based on the insecure and caFile parameters and
-// adds a User-Agent header.
-func newORASHTTPClient(insecure bool, caFile string) (*http.Client, error) {
-	transport, ok := http.DefaultTransport.(*http.Transport)
-	if !ok {
-		transport = &http.Transport{}
-	}
-
-	// Clone the default transport to avoid mutating the global default.
-	tlsConfig := &tls.Config{}
-	if transport.TLSClientConfig != nil {
-		tlsConfig = transport.TLSClientConfig.Clone()
-	}
-
-	if insecure {
-		tlsConfig.InsecureSkipVerify = true
-	}
-
-	if caFile != "" {
-		caCert, err := os.ReadFile(caFile)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read CA file %q: %w", caFile, err)
-		}
-
-		// Start with system cert pool or create new one
-		if tlsConfig.RootCAs == nil {
-			tlsConfig.RootCAs, _ = x509.SystemCertPool()
-			if tlsConfig.RootCAs == nil {
-				tlsConfig.RootCAs = x509.NewCertPool()
-			}
-		}
-
-		// Append and validate custom CA certificates
-		if !tlsConfig.RootCAs.AppendCertsFromPEM(caCert) {
-			return nil, fmt.Errorf("failed to parse any valid certificates from CA file %q", caFile)
-		}
-	}
-
-	transport = transport.Clone()
-	transport.TLSClientConfig = tlsConfig
-
-	client := &http.Client{
-		Transport: &userAgentRoundTripper{
-			next: transport,
-			userAgent: userAgent(),
-		},
-	}
-
-	return client, nil
 }
 
 // userAgentRoundTripper wraps an http.RoundTripper to add a custom User-Agent

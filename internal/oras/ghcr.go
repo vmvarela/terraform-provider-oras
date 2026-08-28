@@ -49,7 +49,7 @@ func tryDeleteGHCRTag(ctx context.Context, repo *orasRepositoryClient, tag strin
 		return errNotGHCR
 	}
 
-	token, err := repo.accessTokenForHost(ctx, host)
+	token, err := repo.accessToken(ctx)
 	if err != nil {
 		return err
 	}

@@ -143,20 +143,40 @@ func countZotVersionTags(t *testing.T, addr, repoPath, prefix string) int {
 }
 
 // newZotClient creates a *Client configured for the local zot test registry.
-// Default options (WithInsecure, WithRetryConfig) are always applied; additional
-// opts are appended and may override defaults.
-func newZotClient(t *testing.T, addr, repoPath string, opts ...Option) *Client {
+// Additional opts are merged with the base config.
+func newZotClient(t *testing.T, addr, repoPath string, cfg Config) *Client {
 	t.Helper()
-	allOpts := append([]Option{
-		WithInsecure(true),
-		WithRetryConfig(RetryConfig{
-			MaxAttempts:       2,
-			InitialBackoff:    100 * time.Millisecond,
-			MaxBackoff:        time.Second,
-			BackoffMultiplier: 2.0,
-		}),
-	}, opts...)
-	client, err := NewClient(addr, repoPath, allOpts...)
+	base := Config{
+		Insecure:    true,
+		Compression: "none",
+	}
+	// Merge provided config over base
+	if cfg.HTTPClient != nil {
+		base.HTTPClient = cfg.HTTPClient
+	}
+	if cfg.CAFile != "" {
+		base.CAFile = cfg.CAFile
+	}
+	if cfg.Username != "" || cfg.Password != "" {
+		base.Username = cfg.Username
+		base.Password = cfg.Password
+	}
+	if cfg.Token != "" {
+		base.Token = cfg.Token
+	}
+	if cfg.Compression != "" {
+		base.Compression = cfg.Compression
+	}
+	if cfg.LockTTL != 0 {
+		base.LockTTL = cfg.LockTTL
+	}
+	if cfg.MaxVersions != 0 {
+		base.MaxVersions = cfg.MaxVersions
+	}
+	if cfg.MaxStateSize != 0 {
+		base.MaxStateSize = cfg.MaxStateSize
+	}
+	client, err := NewClient(addr, repoPath, base)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -175,7 +195,7 @@ func TestZotIntegration_StateGetPutDelete(t *testing.T) {
 	startZot(t, port)
 	waitForZot(t, addr)
 
-	c := newZotClient(t, addr, "ghoten-test/state")
+	c := newZotClient(t, addr, "ghoten-test/state", Config{})
 
 	// Get on empty workspace must return nil.
 	data, err := c.Get(ctx, "ephemeral")
@@ -226,7 +246,7 @@ func TestZotIntegration_LockUnlock(t *testing.T) {
 	startZot(t, port)
 	waitForZot(t, addr)
 
-	c := newZotClient(t, addr, "ghoten-test/lock")
+	c := newZotClient(t, addr, "ghoten-test/lock", Config{})
 
 	// First lock should succeed.
 	id1, err := c.Lock(ctx, "default", LockInfo{
@@ -275,7 +295,7 @@ func TestZotIntegration_LockTTLStaleClearing(t *testing.T) {
 	waitForZot(t, addr)
 
 	// Use a short TTL so we can observe expiry.
-	c := newZotClient(t, addr, "ghoten-test/lock-ttl", WithLockTTL(time.Second))
+	c := newZotClient(t, addr, "ghoten-test/lock-ttl", Config{LockTTL: time.Second})
 
 	_, err := c.Lock(ctx, "default", LockInfo{
 		ID:        "stale-lock",
@@ -289,7 +309,7 @@ func TestZotIntegration_LockTTLStaleClearing(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	// A new client instance must auto-clear the stale lock.
-	c2 := newZotClient(t, addr, "ghoten-test/lock-ttl", WithLockTTL(time.Second))
+	c2 := newZotClient(t, addr, "ghoten-test/lock-ttl", Config{LockTTL: time.Second})
 	id2, err := c2.Lock(ctx, "default", LockInfo{
 		ID:        "after-stale",
 		Operation: "after-stale",
@@ -313,7 +333,7 @@ func TestZotIntegration_Retention(t *testing.T) {
 	waitForZot(t, addr)
 
 	const maxVersions = 3
-	c := newZotClient(t, addr, "ghoten-test/retention", WithMaxVersions(maxVersions))
+	c := newZotClient(t, addr, "ghoten-test/retention", Config{MaxVersions: maxVersions})
 
 	// Write more states than maxVersions.
 	for i := range maxVersions + 2 {
@@ -344,7 +364,7 @@ func TestZotIntegration_Workspaces(t *testing.T) {
 	startZot(t, port)
 	waitForZot(t, addr)
 
-	c := newZotClient(t, addr, "ghoten-test/workspaces")
+	c := newZotClient(t, addr, "ghoten-test/workspaces", Config{})
 
 	// Write state for three workspaces.
 	for _, ws := range []string{"prod", "staging", "dev"} {
@@ -383,7 +403,7 @@ func TestZotIntegration_Compression(t *testing.T) {
 	startZot(t, port)
 	waitForZot(t, addr)
 
-	c := newZotClient(t, addr, "ghoten-test/compression", WithCompression(true))
+	c := newZotClient(t, addr, "ghoten-test/compression", Config{Compression: "gzip"})
 
 	original := bytes.Repeat([]byte("hello-terraform-state"), 100)
 	if err := c.Put(ctx, "default", original); err != nil {

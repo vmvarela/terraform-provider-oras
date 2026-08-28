@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
 	"strings"
 	"time"
 
@@ -16,15 +15,14 @@ import (
 	ssschema "github.com/hashicorp/terraform-plugin-framework/statestore/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
-	"github.com/vmvarela/terraform-provider-oras/internal/config"
 	"github.com/vmvarela/terraform-provider-oras/internal/oras"
+	"github.com/vmvarela/terraform-provider-oras/internal/providerdata"
 )
 
 // Compile-time interface checks.
 var (
-	_ fwss.StateStore                  = (*OCIStateStore)(nil)
-	_ fwss.StateStoreWithConfigure     = (*OCIStateStore)(nil)
-	_ fwss.StateStoreWithValidateConfig = (*OCIStateStore)(nil)
+	_ fwss.StateStore              = (*OCIStateStore)(nil)
+	_ fwss.StateStoreWithConfigure = (*OCIStateStore)(nil)
 )
 
 // OCIStateStore implements fwss.StateStore using OCI registries via the ORAS protocol.
@@ -85,56 +83,7 @@ func (s *OCIStateStore) Schema(_ context.Context, _ fwss.SchemaRequest, resp *fw
 	}
 }
 
-// ValidateConfig validates the state store configuration before initialization.
-func (s *OCIStateStore) ValidateConfig(ctx context.Context, req fwss.ValidateConfigRequest, resp *fwss.ValidateConfigResponse) {
-	var cfg storeModel
-	resp.Diagnostics.Append(req.Config.Get(ctx, &cfg)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
 
-	if !cfg.URL.IsNull() && !cfg.URL.IsUnknown() {
-		u := cfg.URL.ValueString()
-		// Validate full URL structure
-		if _, _, err := parseOCIURL(u); err != nil {
-			resp.Diagnostics.AddAttributeError(
-				path.Root("url"),
-				"Invalid OCI URL",
-				err.Error(),
-			)
-		}
-	}
-
-	if !cfg.LockTTL.IsNull() && !cfg.LockTTL.IsUnknown() {
-		if _, err := time.ParseDuration(cfg.LockTTL.ValueString()); err != nil {
-			resp.Diagnostics.AddAttributeError(
-				path.Root("lock_ttl"),
-				"Invalid lock_ttl",
-				fmt.Sprintf("lock_ttl must be a valid Go duration (e.g., '15m', '1h'): %s", err),
-			)
-		}
-	}
-
-	if !cfg.MaxVersions.IsNull() && !cfg.MaxVersions.IsUnknown() {
-		if cfg.MaxVersions.ValueInt64() < 0 {
-			resp.Diagnostics.AddAttributeError(
-				path.Root("max_versions"),
-				"Invalid max_versions",
-				"max_versions must be >= 0",
-			)
-		}
-	}
-
-	if !cfg.MaxStateSize.IsNull() && !cfg.MaxStateSize.IsUnknown() {
-		if cfg.MaxStateSize.ValueInt64() < 0 {
-			resp.Diagnostics.AddAttributeError(
-				path.Root("max_state_size"),
-				"Invalid max_state_size",
-				"max_state_size must be >= 0",
-			)
-		}
-	}
-}
 
 // Initialize parses the configuration, creates the ORAS client, and stores it
 // in InitializeResponse.StateStoreData for later retrieval via Configure.
@@ -158,43 +107,46 @@ func (s *OCIStateStore) Initialize(ctx context.Context, req fwss.InitializeReque
 		return
 	}
 
-	var opts []oras.Option
+	orasCfg := oras.Config{
+		Compression: "none",
+	}
 
 	// Forward provider-level TLS settings to the ORAS client.
-	if pd, ok := req.ProviderData.(*config.ProviderData); ok && pd != nil {
+	if pd, ok := req.ProviderData.(*providerdata.ProviderData); ok && pd != nil {
 		if pd.HTTPClient != nil {
-			opts = append(opts, oras.WithHTTPClient(pd.HTTPClient))
+			orasCfg.HTTPClient = pd.HTTPClient
 		}
-		// WithInsecure sets repo.PlainHTTP, required for http:// registries
+		// Insecure sets repo.PlainHTTP, required for http:// registries
 		// (e.g. local Zot). Must be passed even when a custom HTTPClient exists.
 		if pd.Insecure {
-			opts = append(opts, oras.WithInsecure(true))
+			orasCfg.Insecure = true
 		}
 		if pd.CAFile != "" {
-			opts = append(opts, oras.WithCAFile(pd.CAFile))
+			orasCfg.CAFile = pd.CAFile
 		}
 	}
 
 	if !cfg.Compression.IsNull() && !cfg.Compression.IsUnknown() {
-		opts = append(opts, oras.WithCompression(cfg.Compression.ValueBool()))
+		if cfg.Compression.ValueBool() {
+			orasCfg.Compression = "gzip"
+		}
 	}
 
 	if !cfg.LockTTL.IsNull() && !cfg.LockTTL.IsUnknown() {
-		// ParseDuration already validated in ValidateConfig, ignore error here.
 		if ttl, err := time.ParseDuration(cfg.LockTTL.ValueString()); err == nil {
-			opts = append(opts, oras.WithLockTTL(ttl))
+			orasCfg.LockTTL = ttl
 		}
 	}
 
 	if !cfg.MaxVersions.IsNull() && !cfg.MaxVersions.IsUnknown() {
-		opts = append(opts, oras.WithMaxVersions(int(cfg.MaxVersions.ValueInt64())))
+		orasCfg.MaxVersions = int(cfg.MaxVersions.ValueInt64())
 	}
 
 	if !cfg.MaxStateSize.IsNull() && !cfg.MaxStateSize.IsUnknown() {
-		opts = append(opts, oras.WithMaxStateSize(cfg.MaxStateSize.ValueInt64()))
+		orasCfg.MaxStateSize = cfg.MaxStateSize.ValueInt64()
 	}
 
-	client, err := oras.NewClient(registry, repository, opts...)
+	client, err := oras.NewClient(registry, repository, orasCfg)
 	if err != nil {
 		resp.Diagnostics.AddError("Failed to create OCI client", err.Error())
 		return
@@ -317,30 +269,21 @@ func parseOCIURL(rawURL string) (registry, repository string, err error) {
 	if !strings.HasPrefix(rawURL, "oci://") {
 		return "", "", fmt.Errorf("URL must start with 'oci://', got: %q", rawURL)
 	}
-
-	// Substitute scheme for standard URL parsing while preserving the host:port.
-	u, err := url.Parse("https://" + strings.TrimPrefix(rawURL, "oci://"))
-	if err != nil {
-		return "", "", fmt.Errorf("invalid OCI URL %q: %w", rawURL, err)
+	rest := strings.TrimPrefix(rawURL, "oci://")
+	idx := strings.Index(rest, "/")
+	if idx < 0 {
+		return "", "", fmt.Errorf("OCI URL %q is missing the repository path", rawURL)
 	}
-
-	registry = u.Host
+	registry = rest[:idx]
+	repository = rest[idx+1:]
 	if registry == "" {
 		return "", "", fmt.Errorf("OCI URL %q is missing the registry host", rawURL)
 	}
-
-	repository = strings.TrimPrefix(u.Path, "/")
 	if repository == "" {
 		return "", "", fmt.Errorf("OCI URL %q is missing the repository path", rawURL)
 	}
-
-	// Validate repository path for invalid components
-	if strings.Contains(repository, "..") {
-		return "", "", fmt.Errorf("OCI URL %q contains invalid path component '..'", rawURL)
+	if strings.Contains(repository, "..") || strings.Contains(repository, "//") {
+		return "", "", fmt.Errorf("OCI URL %q contains invalid path component", rawURL)
 	}
-	if strings.Contains(repository, "//") {
-		return "", "", fmt.Errorf("OCI URL %q contains invalid path component '//'", rawURL)
-	}
-
 	return registry, repository, nil
 }
