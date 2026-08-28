@@ -47,3 +47,76 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12
+
+  integration-test:
+    name: Integration Test (Zot)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run Zot integration tests
+        env:
+          TF_ORAS_ZOT_TEST: "1"
+        run: go test -race -v -timeout 120s ./internal/oras/... -run Zot
+
+  terraform-integration:
+    name: Terraform Integration (State Store)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Terraform (alpha)
+        run: |
+          curl -fsSL "https://releases.hashicorp.com/terraform/1.17.0-alpha20260827/terraform_1.17.0-alpha20260827_linux_amd64.zip" -o terraform.zip
+          unzip -o terraform.zip -d /usr/local/bin/
+          terraform version
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Start Zot registry
+        run: |
+          docker run -d --rm --name zot-terraform-test \
+            -p 5001:5000 \
+            -v "$(pwd)/testdata/zot-config.json:/etc/zot/config.json:ro" \
+            ghcr.io/project-zot/zot-linux-amd64:v2.1.0
+          # Wait for Zot to be ready
+          for i in {1..30}; do
+            if curl -sf http://localhost:5001/v2/ >/dev/null; then
+              echo "Zot ready"
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Build provider
+        run: go build -o terraform-provider-oras .
+
+      - name: Run Terraform init & apply
+        env:
+          TF_ENABLE_PLUGGABLE_STATE_STORAGE: "1"
+        run: |
+          cd examples
+          # Create terraform.rc to use local provider
+          cat > terraform.rc <<'EOF'
+          provider_installation {
+            dev_overrides {
+              "vmvarela/oras" = "$(pwd)/.."
+            }
+            direct {}
+          }
+          EOF
+          TF_CLI_CONFIG_FILE="terraform.rc" terraform init -upgrade
+          TF_CLI_CONFIG_FILE="terraform.rc" terraform apply -auto-approve -input=false
+        working-directory: ${{ github.workspace }}
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f zot-terraform-test || true
