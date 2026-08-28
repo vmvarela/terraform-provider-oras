@@ -105,10 +105,10 @@ jobs:
         run: |
           cd examples
           # Create terraform.rc to use local provider
-          cat > terraform.rc <<'EOF'
+          cat > terraform.rc <<EOF
           provider_installation {
             dev_overrides {
-              "vmvarela/oras" = "$(pwd)/.."
+              "vmvarela/oras" = "${{ github.workspace }}"
             }
             direct {}
           }
