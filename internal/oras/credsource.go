@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/gohcl"
@@ -34,7 +35,7 @@ type cliDefaultCredentialsBlock struct {
 
 // cliConfig is the parsed Terraform CLI config relevant to OCI credentials.
 type cliConfig struct {
-	Credentials     []cliCredentialBlock      `hcl:"oci_credentials,block"`
+	Credentials     []cliCredentialBlock        `hcl:"oci_credentials,block"`
 	DefaultProvider *cliDefaultCredentialsBlock `hcl:"oci_default_credentials,block"`
 }
 
@@ -45,7 +46,7 @@ func parseConfigKey(key string) (domain, path string, ok bool) {
 	if key == "" {
 		return "", "", true
 	}
-	if !hasSlash(key) {
+	if !strings.Contains(key, "/") {
 		return key, "", true
 	}
 	ref, err := orasRegistry.ParseReference(key)
@@ -57,15 +58,6 @@ func parseConfigKey(key string) (domain, path string, ok bool) {
 		return "", "", false
 	}
 	return ref.Registry, ref.Repository, true
-}
-
-func hasSlash(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] == '/' {
-			return true
-		}
-	}
-	return false
 }
 
 // configKeyMatch returns the specificity of a config key for the given
@@ -83,8 +75,8 @@ func configKeyMatch(key, domain, path string) int {
 	if kp == "" {
 		return 2
 	}
-	keySegs := splitPath(kp)
-	wantSegs := splitPath(path)
+	keySegs := strings.Split(kp, "/")
+	wantSegs := strings.Split(path, "/")
 	if len(keySegs) > len(wantSegs) {
 		return 0
 	}
@@ -94,20 +86,6 @@ func configKeyMatch(key, domain, path string) int {
 		}
 	}
 	return 2 + len(keySegs)
-}
-
-func splitPath(p string) []string {
-	var segs []string
-	start := 0
-	for i := 0; i <= len(p); i++ {
-		if i == len(p) || p[i] == '/' {
-			if i > start {
-				segs = append(segs, p[start:i])
-			}
-			start = i + 1
-		}
-	}
-	return segs
 }
 
 // cliConfigPath returns the Terraform CLI config path to inspect:
