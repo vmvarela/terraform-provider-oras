@@ -13,3 +13,6 @@ terraform-provider-oras
 
 # Deepwork
 .slim/deepwork/
+
+# direnv
+.envrc
