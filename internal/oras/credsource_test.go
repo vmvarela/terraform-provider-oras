@@ -24,7 +24,10 @@ func clearCredEnv(t *testing.T) {
 	} {
 		t.Setenv(key, "")
 	}
-	t.Setenv("HOME", t.TempDir()) // isolates ~/.terraformrc, ~/.docker, ~/.config
+	tmpHome := t.TempDir()
+	// os.UserHomeDir() uses HOME on Unix but USERPROFILE on Windows.
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("USERPROFILE", tmpHome)
 }
 
 // writeTestFile writes content to dir/name and returns the full path.
@@ -527,6 +530,7 @@ func TestAccessTokenFallbackFromResolvedCredential(t *testing.T) {
 		clearCredEnv(t)
 		dir := t.TempDir()
 		t.Setenv("HOME", dir)
+		t.Setenv("USERPROFILE", dir) // os.UserHomeDir() on Windows ignores HOME
 		writeTestFile(t, dir, ".docker/config.json", `{
 			"auths": {"ghcr.io": {"auth": "` + base64.StdEncoding.EncodeToString([]byte("docker-user:docker-token")) + `"}}
 		}`)

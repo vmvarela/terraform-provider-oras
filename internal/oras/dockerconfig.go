@@ -110,6 +110,11 @@ func dockerHelperCredential(ctx context.Context, helper, registryDomain string) 
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, bin, "get")
+	// ponytail: killed shell leaves grandchildren holding the stdout pipe;
+	// WaitDelay closes pipes 2s after ctx cancel instead of blocking on them.
+	// Raise WaitDelay (or drop to 0) if a real credential helper ever reports
+	// truncated output on timeout.
+	cmd.WaitDelay = 2 * time.Second
 	cmd.Stdin = strings.NewReader("https://" + registryDomain)
 	var out bytes.Buffer
 	cmd.Stdout = &out
