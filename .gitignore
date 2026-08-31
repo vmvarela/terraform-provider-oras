@@ -2,6 +2,8 @@
 terraform-provider-oras
 
 # Terraform
+.terraformrc.dev
+terraform.rc
 .terraform/
 *.tfstate
 *.tfstate.backup
