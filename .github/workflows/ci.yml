@@ -66,8 +66,8 @@ jobs:
 
   ghcr-integration:
     name: Integration Test (GHCR)
-    # Push-only: fork PRs get a read-only GITHUB_TOKEN that cannot push packages.
-    if: github.event_name == 'push'
+    # Skip fork PRs: their GITHUB_TOKEN is read-only and cannot push packages.
+    if: github.event_name == 'push' || (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork)
     runs-on: ubuntu-latest
     permissions:
       contents: read
