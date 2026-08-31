@@ -147,7 +147,7 @@ func (r *fakeORASRepo) Tags(ctx context.Context, last string, fn func(tags []str
 }
 
 // readLockData fetches and parses the lock manifest metadata for wc.
-func readLockData(t *testing.T, ctx context.Context, wc *workspaceClient) *LockManifestData {
+func readLockData(t *testing.T, ctx context.Context, wc *workspaceClient) *lockManifestData {
 	t.Helper()
 	m, _, err := wc.fetchManifestWithDesc(ctx, wc.lockTag)
 	if err != nil {

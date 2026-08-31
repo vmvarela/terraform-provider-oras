@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions & discussions
+    url: https://github.com/vmvarela/terraform-provider-oras/discussions
+    about: Ask questions about configuration, registries, or usage.
+  - name: Security vulnerabilities
+    url: https://github.com/vmvarela/terraform-provider-oras/security/advisories/new
+    about: Report vulnerabilities via private vulnerability reporting — do not open a public issue.

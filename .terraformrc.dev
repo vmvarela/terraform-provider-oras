@@ -1,6 +1,0 @@
-provider_installation {
-  dev_overrides {
-    "vmvarela/oras" = "/Users/victor/dev/vmvarela/terraform-provider-oras"
-  }
-  direct {}
-}

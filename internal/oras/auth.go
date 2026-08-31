@@ -44,7 +44,7 @@ func BuildHTTPClient(insecure bool, caFile string) (*http.Client, error) {
 		t.TLSClientConfig.RootCAs = pool
 	}
 
-	return &http.Client{Transport: t}, nil
+	return &http.Client{Transport: t, Timeout: 30 * time.Second}, nil
 }
 
 // Version is the provider version, set at build time via -ldflags (e.g. -X 'oras.Version=1.0.0').
@@ -58,16 +58,27 @@ func userAgent() string {
 
 // Config holds all configurable options for the ORAS client.
 type Config struct {
-	Insecure     bool
-	CAFile       string
-	Username     string
-	Password     string
-	Token        string
-	Compression  bool // gzip when true
-	LockTTL      time.Duration
-	MaxVersions  int
+	// Insecure uses plain HTTP (no TLS) when true.
+	Insecure bool
+	// CAFile is the path to a PEM file with custom CA certificates for TLS.
+	CAFile string
+	// Username is the explicit registry username (priority 2 credential).
+	Username string
+	// Password is the explicit registry password (priority 2 credential).
+	Password string
+	// Token is the explicit registry access token (highest credential priority).
+	Token string
+	// Compression gzip-compresses state layers when true.
+	Compression bool // gzip when true
+	// LockTTL is the lock lease duration; 0 means locks never expire.
+	LockTTL time.Duration
+	// MaxVersions is the number of state versions to retain; <= 0 disables versioning.
+	MaxVersions int
+	// MaxStateSize is the upper bound on state data; <= 0 uses the 256 MiB default.
 	MaxStateSize int64
-	HTTPClient   *http.Client
+	// HTTPClient is an optional pre-configured HTTP client; one is built from
+	// Insecure/CAFile when nil.
+	HTTPClient *http.Client
 }
 
 // Client is the top-level ORAS client that holds the shared OCI repository
@@ -147,18 +158,26 @@ func newORASRepositoryClient(registry, repository string, cfg Config) (*orasRepo
 	// Use provided HTTP client if set, otherwise build one
 	var httpClient *http.Client
 	if cfg.HTTPClient != nil {
-		httpClient = cfg.HTTPClient
+		// Do not mutate the caller's client; clone before wrapping Transport.
+		cloned := *cfg.HTTPClient
+		httpClient = &cloned
 	} else {
 		httpClient, err = BuildHTTPClient(cfg.Insecure, cfg.CAFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create HTTP client: %w", err)
 		}
-		// Add User-Agent header for ORAS registry operations
-		httpClient = &http.Client{
-			Transport: &userAgentRoundTripper{
-				next:      httpClient.Transport,
-				userAgent: userAgent(),
-			},
+	}
+
+	// Add User-Agent header for ORAS registry operations, regardless of
+	// whether the client came from config or was built here.
+	if _, already := httpClient.Transport.(*userAgentRoundTripper); !already {
+		next := httpClient.Transport
+		if next == nil {
+			next = http.DefaultTransport
+		}
+		httpClient.Transport = &userAgentRoundTripper{
+			next:      next,
+			userAgent: userAgent(),
 		}
 	}
 

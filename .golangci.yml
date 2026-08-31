@@ -1,0 +1,49 @@
+version: "2"
+
+linters:
+  enable:
+    - bodyclose
+    - copyloopvar
+    - errorlint
+    - gosec
+    - misspell
+    - nilerr
+    - revive
+    - unconvert
+  settings:
+    revive:
+      # go default subset is fine; avoid style-only rules that fight gofmt
+      rules:
+        - name: exported
+  exclusions:
+    rules:
+      # Tests intentionally ignore errors and do insecure things (weak RNG,
+      # plain-HTTP local registry).
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+      # gosec G304: os.ReadFile from user-supplied paths — reading CA certs and
+      # Docker config files from user config is the provider's core feature.
+      - linters:
+          - gosec
+        text: "G304"
+      # gosec G204: exec of Docker credential helper binaries from user config.
+      - linters:
+          - gosec
+        text: "G204"
+      # gosec G118: retention goroutine outlives the request on purpose
+      # (async version pruning — see AGENTS.md); request context would cancel it.
+      - path: internal/oras/client\.go
+        linters:
+          - gosec
+        text: "G118"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/vmvarela/terraform-provider-oras

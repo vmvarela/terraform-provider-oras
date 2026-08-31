@@ -1,5 +1,8 @@
 # terraform-provider-oras
 
+[![CI](https://github.com/vmvarela/terraform-provider-oras/actions/workflows/ci.yml/badge.svg)](https://github.com/vmvarela/terraform-provider-oras/actions/workflows/ci.yml)
+[![License: MPL-2.0](https://img.shields.io/badge/License-MPL--2.0-blue.svg)](https://opensource.org/licenses/MPL-2.0)
+
 Store Terraform state in any OCI-compatible registry — GHCR, Docker Hub, Zot, Harbor, or your
 own — using the ORAS protocol. If your team already runs an OCI registry, you can skip a
 dedicated state backend and keep state next to your container images.
@@ -42,7 +45,8 @@ make test                           # unit tests, no external deps
 TF_ORAS_ZOT_TEST=1 make test-zot    # integration: spins Zot via Docker
 make lint
 make install                        # build + install to ~/.terraform.d/...
-cp .terraformrc.dev ~/.terraformrc  # dev override
+make dev-override                   # generate .terraformrc.dev pointing at this checkout
+export TF_CLI_CONFIG_FILE=$PWD/.terraformrc.dev
 ```
 
 [`examples/main.tf`](examples/main.tf) is a runnable local example against Zot over plain HTTP.

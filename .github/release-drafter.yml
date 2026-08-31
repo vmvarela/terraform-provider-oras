@@ -10,6 +10,7 @@ categories:
   - title: '🧰 Maintenance'
     labels:
       - 'type:chore'
+      - 'dependencies'
   - title: '📖 Documentation'
     labels:
       - 'type:docs'
@@ -27,7 +28,36 @@ version-resolver:
       - 'type:bug'
       - 'type:chore'
       - 'type:docs'
+      - 'dependencies'
   default: patch
+autolabeler:
+  - label: 'type:feature'
+    title:
+      - '/^feat(\(.+\))?!?:/'
+    branch:
+      - '/^feature\//'
+      - '/^feat\//'
+  - label: 'type:bug'
+    title:
+      - '/^fix(\(.+\))?!?:/'
+    branch:
+      - '/^fix\//'
+      - '/^bugfix\//'
+  - label: 'type:chore'
+    title:
+      - '/^chore(\(.+\))?!?:/'
+      - '/^ci(\(.+\))?!?:/'
+      - '/^build(\(.+\))?!?:/'
+    branch:
+      - '/^chore\//'
+  - label: 'type:docs'
+    title:
+      - '/^docs(\(.+\))?!?:/'
+    branch:
+      - '/^docs\//'
+  - label: 'breaking'
+    title:
+      - '/^[a-z]+(\(.+\))?!:/'
 template: |
   ## What's Changed
 
