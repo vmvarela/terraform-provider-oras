@@ -35,22 +35,27 @@ type dockerAuthEntry struct {
 }
 
 // dockerConfigPaths returns the candidate Docker/containers config file paths
-// in search order. Missing files are skipped by the caller.
+// in search order. Missing files are skipped by the caller. A path is omitted
+// rather than guessed when its base directory is unknown, so a container
+// without HOME still picks up XDG_CONFIG_HOME.
 // ponytail: dropped XDG_RUNTIME_DIR (podman ephemeral session creds); add it
 // back if someone runs terraform inside a podman-login shell.
 func dockerConfigPaths() []string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil
-	}
+	home, homeErr := os.UserHomeDir()
+
 	configHome := os.Getenv("XDG_CONFIG_HOME")
-	if configHome == "" {
+	if configHome == "" && homeErr == nil {
 		configHome = filepath.Join(home, ".config")
 	}
-	return []string{
-		filepath.Join(configHome, "containers", "auth.json"),
-		filepath.Join(home, ".docker", "config.json"),
+
+	var paths []string
+	if configHome != "" {
+		paths = append(paths, filepath.Join(configHome, "containers", "auth.json"))
 	}
+	if homeErr == nil {
+		paths = append(paths, filepath.Join(home, ".docker", "config.json"))
+	}
+	return paths
 }
 
 // loadDockerConfig reads and parses a Docker-style config file.

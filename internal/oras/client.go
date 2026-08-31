@@ -396,15 +396,26 @@ func (wc *workspaceClient) lock(ctx context.Context, info *LockInfo) (string, er
 	}
 
 	// Post-write verification: one fetch, both parses — ensure we hold the lock.
+	// The cleanup is a no-op whenever the tag has moved, which is the only way
+	// parsing can fail: content addressing guarantees our own digest fetches
+	// back our own bytes.
+	cleanupOurTag := func() {
+		if d, err := wc.client.repoClient.inner.Resolve(ctx, wc.lockTag); err == nil && d.Digest == manifestDesc.Digest {
+			_ = wc.client.repoClient.inner.Delete(ctx, d)
+		}
+	}
+
 	held, _, err := wc.fetchManifestWithDesc(ctx, wc.lockTag)
 	if err != nil {
-		if cleanupDesc, cleanupErr := wc.client.repoClient.inner.Resolve(ctx, wc.lockTag); cleanupErr == nil && cleanupDesc.Digest == manifestDesc.Digest {
-			_ = wc.client.repoClient.inner.Delete(ctx, cleanupDesc)
-		}
+		cleanupOurTag()
 		return "", fmt.Errorf("failed to verify lock acquisition: %w", err)
 	}
-	verified, _ := parseLockManifestData(&held)
-	if verified == nil || verified.Generation != newGeneration || verified.HolderID != info.ID {
+	verified, err := parseLockManifestData(&held)
+	if err != nil {
+		cleanupOurTag()
+		return "", fmt.Errorf("failed to verify lock acquisition: %w", err)
+	}
+	if verified.Generation != newGeneration || verified.HolderID != info.ID {
 		existing, _ := parseLockInfo(&held, wc.stateTag)
 		return "", &LockError{Info: existing, Err: fmt.Errorf("state is locked (lost race)")}
 	}

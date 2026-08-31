@@ -1177,6 +1177,56 @@ func TestRemoteClient_Lock_SameGenerationRaceDetectedByHolderID(t *testing.T) {
 	}
 }
 
+// newForeignManifest builds a valid OCI manifest carrying a non-lock
+// artifactType, so parseLockManifestData rejects it.
+func newForeignManifest(ctx context.Context, t *testing.T, repo *fakeORASRepo) (ocispec.Descriptor, []byte) {
+	t.Helper()
+	m := ocispec.Manifest{
+		MediaType:    ocispec.MediaTypeImageManifest,
+		ArtifactType: artifactTypeState, // deliberately not artifactTypeLock
+		Annotations:  map[string]string{},
+		Layers:       []ocispec.Descriptor{},
+	}
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal foreign manifest: %v", err)
+	}
+	d := digest.FromBytes(raw)
+	desc := ocispec.Descriptor{MediaType: ocispec.MediaTypeImageManifest, Digest: d, Size: int64(len(raw))}
+	_ = repo.Push(ctx, desc, bytes.NewReader(raw))
+	return desc, raw
+}
+
+// A manifest the lock parser rejects must surface as a verification failure,
+// not as lock contention: reporting "state is locked" sends the operator
+// looking for a competing apply instead of the malformed manifest.
+func TestRemoteClient_Lock_ForeignManifestIsVerificationFailure(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeORASRepo()
+
+	foreignDesc, foreignRaw := newForeignManifest(ctx, t, fake)
+	raceRepo := &raceSimulatingRepo{
+		delegatingRepo: delegatingRepo{inner: fake},
+		rivalDesc:      foreignDesc,
+		rivalData:      foreignRaw,
+	}
+	repo := &orasRepositoryClient{inner: raceRepo}
+	c := newRemoteClient(repo, "default")
+	raceRepo.raceTag = c.lockTag
+
+	_, err := c.lock(ctx, &LockInfo{ID: "my-lock-id", Operation: "apply", Created: time.Now()})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var lockErr *LockError
+	if errors.As(err, &lockErr) {
+		t.Fatalf("corrupt lock manifest surfaced as lock contention: %v", err)
+	}
+	if !strings.Contains(err.Error(), "failed to verify lock acquisition") {
+		t.Errorf("error = %q, want it to mention verification failure", err)
+	}
+}
+
 func TestLockWithGenerationDetection(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakeORASRepo()

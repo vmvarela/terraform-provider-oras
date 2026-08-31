@@ -556,4 +556,18 @@ func TestDockerConfigPaths(t *testing.T) {
 			t.Errorf("dockerConfigPaths()[0] = %v, want %q", got, want)
 		}
 	})
+
+	t.Run("XDG_CONFIG_HOME survives an unknown home dir", func(t *testing.T) {
+		xdg := t.TempDir()
+		t.Setenv("XDG_CONFIG_HOME", xdg)
+		// os.UserHomeDir() fails when neither is set (HOME on Unix,
+		// USERPROFILE on Windows) — as in a container without HOME.
+		t.Setenv("HOME", "")
+		t.Setenv("USERPROFILE", "")
+
+		want := []string{filepath.Join(xdg, "containers", "auth.json")}
+		if got := dockerConfigPaths(); !slices.Equal(got, want) {
+			t.Errorf("dockerConfigPaths() = %v, want %v", got, want)
+		}
+	})
 }
