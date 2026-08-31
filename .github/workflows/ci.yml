@@ -64,6 +64,28 @@ jobs:
           TF_ORAS_ZOT_TEST: "1"
         run: go test -race -v -timeout 120s ./internal/oras/... -run Zot
 
+  ghcr-integration:
+    name: Integration Test (GHCR)
+    # Push-only: fork PRs get a read-only GITHUB_TOKEN that cannot push packages.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run GHCR integration tests
+        env:
+          TF_ORAS_GHCR_TEST: "1"
+          TF_ORAS_GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: go test -race -v -timeout 300s ./internal/oras/... -run 'TestGHCRIntegration'
+
   terraform-integration:
     name: Terraform Integration (State Store)
     runs-on: ubuntu-latest
