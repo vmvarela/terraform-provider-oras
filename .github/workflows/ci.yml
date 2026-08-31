@@ -43,7 +43,7 @@ jobs:
 
       - name: Upload coverage profile
         if: matrix.os == 'ubuntu-latest'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-ubuntu
           path: coverage.out
@@ -145,7 +145,7 @@ jobs:
             -v "$(pwd)/testdata/zot-config.json:/etc/zot/config.json:ro" \
             ghcr.io/project-zot/zot-linux-amd64:v2.1.0
           # Wait for Zot to be ready
-          for i in {1..30}; do
+          for _ in {1..30}; do
             if curl -sf http://localhost:5001/v2/ >/dev/null; then
               echo "Zot ready"
               break

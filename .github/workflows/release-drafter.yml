@@ -11,12 +11,25 @@ permissions:
   contents: read
 
 jobs:
+  # Drafts the next release from merged PRs. Only needs write access to releases.
   update-release-draft:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: write
+    steps:
+      - uses: release-drafter/release-drafter@v7
+
+  # Labels PRs from their title and branch so the drafter can categorise them.
+  # Fork PRs carry a read-only token and cannot be labelled, so they are skipped
+  # rather than left with a failing check.
+  autolabel:
+    if: github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
       pull-requests: write
     steps:
-      - uses: release-drafter/release-drafter@v6
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: release-drafter/release-drafter/autolabeler@v7
