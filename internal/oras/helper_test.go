@@ -5,8 +5,9 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"sort"
+	"slices"
 	"sync"
+	"testing"
 
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -129,7 +130,7 @@ func (r *fakeORASRepo) Tags(ctx context.Context, last string, fn func(tags []str
 	}
 	r.mu.Unlock()
 
-	sort.Strings(tags)
+	slices.Sort(tags)
 
 	start := 0
 	if last != "" {
@@ -143,4 +144,18 @@ func (r *fakeORASRepo) Tags(ctx context.Context, last string, fn func(tags []str
 	}
 
 	return fn(tags[start:])
+}
+
+// readLockData fetches and parses the lock manifest metadata for wc.
+func readLockData(t *testing.T, ctx context.Context, wc *workspaceClient) *LockManifestData {
+	t.Helper()
+	m, _, err := wc.fetchManifestWithDesc(ctx, wc.lockTag)
+	if err != nil {
+		t.Fatalf("fetch lock manifest: %v", err)
+	}
+	data, err := parseLockManifestData(&m)
+	if err != nil {
+		t.Fatalf("parse lock manifest data: %v", err)
+	}
+	return data
 }

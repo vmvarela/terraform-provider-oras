@@ -35,38 +35,22 @@ type dockerAuthEntry struct {
 }
 
 // dockerConfigPaths returns the candidate Docker/containers config file paths
-// in search order. Missing files are skipped by the caller. Duplicates are
-// removed (first occurrence wins) so a file is never parsed — or its helpers
-// invoked — twice, e.g. ~/.config/containers/auth.json when
-// XDG_CONFIG_HOME is unset.
+// in search order. Missing files are skipped by the caller.
+// ponytail: dropped XDG_RUNTIME_DIR (podman ephemeral session creds); add it
+// back if someone runs terraform inside a podman-login shell.
 func dockerConfigPaths() []string {
-	var paths []string
-	seen := map[string]bool{}
-	add := func(p string) {
-		if p != "" && !seen[p] {
-			seen[p] = true
-			paths = append(paths, p)
-		}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
 	}
-	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
-		add(filepath.Join(dir, "containers", "auth.json"))
+	configHome := os.Getenv("XDG_CONFIG_HOME")
+	if configHome == "" {
+		configHome = filepath.Join(home, ".config")
 	}
-	if home, err := os.UserHomeDir(); err == nil {
-		add(filepath.Join(home, ".config", "containers", "auth.json"))
+	return []string{
+		filepath.Join(configHome, "containers", "auth.json"),
+		filepath.Join(home, ".docker", "config.json"),
 	}
-	dir := os.Getenv("XDG_CONFIG_HOME")
-	if dir == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			dir = filepath.Join(home, ".config")
-		}
-	}
-	if dir != "" {
-		add(filepath.Join(dir, "containers", "auth.json"))
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		add(filepath.Join(home, ".docker", "config.json"))
-	}
-	return paths
 }
 
 // loadDockerConfig reads and parses a Docker-style config file.

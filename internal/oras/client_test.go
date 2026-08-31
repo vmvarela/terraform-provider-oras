@@ -8,9 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1188,10 +1191,7 @@ func TestLockWithGenerationDetection(t *testing.T) {
 	}
 
 	// Check lock manifest data for generation 1.
-	data, err := c.getLockManifestData(ctx)
-	if err != nil {
-		t.Fatalf("getLockManifestData: %v", err)
-	}
+	data := readLockData(t, ctx, c)
 	if data.Generation != 1 {
 		t.Errorf("generation = %d, want 1", data.Generation)
 	}
@@ -1211,10 +1211,7 @@ func TestLockWithGenerationDetection(t *testing.T) {
 		t.Fatalf("second lock: %v", err)
 	}
 
-	data2, err := c.getLockManifestData(ctx)
-	if err != nil {
-		t.Fatalf("getLockManifestData: %v", err)
-	}
+	data2 := readLockData(t, ctx, c)
 	if data2.Generation != 1 {
 		t.Errorf("generation = %d, want 1 (generation resets after unlock+delete)", data2.Generation)
 	}
@@ -1233,14 +1230,13 @@ func TestStaleLockCleanupRaceCondition(t *testing.T) {
 	c := newRemoteClient(repo, "default")
 	c.client.config.LockTTL = 5 * time.Minute
 
-	// Create a stale lock manually using packLockManifestWithGeneration,
-	// with a lease that expired a minute ago.
+	// Create a stale lock manually, with a lease that expired a minute ago.
 	staleInfo := &LockInfo{ID: "crashed-process", Operation: "apply", Created: time.Now()}
 	staleInfoBytes, _ := json.Marshal(staleInfo)
 	leaseExpiry := time.Now().Add(-time.Minute).UnixNano()
-	manifestDesc, err := c.packLockManifestWithGeneration(ctx, staleInfo.ID, string(staleInfoBytes), 5, leaseExpiry, staleInfo.ID)
+	manifestDesc, err := c.packLockManifest(ctx, string(staleInfoBytes), 5, leaseExpiry, staleInfo.ID)
 	if err != nil {
-		t.Fatalf("packLockManifestWithGeneration: %v", err)
+		t.Fatalf("packLockManifest: %v", err)
 	}
 	if err := fake.Tag(ctx, manifestDesc, c.lockTag); err != nil {
 		t.Fatalf("tag stale lock: %v", err)
@@ -1482,11 +1478,13 @@ func TestIsTransientError(t *testing.T) {
 		{name: "503 service unavailable", err: &orasErrcode.ErrorResponse{StatusCode: http.StatusServiceUnavailable}, want: true},
 		{name: "504 gateway timeout", err: &orasErrcode.ErrorResponse{StatusCode: http.StatusGatewayTimeout}, want: true},
 		{name: "500 internal server error", err: &orasErrcode.ErrorResponse{StatusCode: http.StatusInternalServerError}, want: false},
-		{name: "connection reset", err: errors.New("connection reset by peer"), want: true},
-		{name: "connection refused", err: errors.New("connection refused"), want: true},
-		{name: "i/o timeout", err: errors.New("i/o timeout"), want: true},
-		{name: "no such host", err: errors.New("no such host"), want: true},
-		{name: "unexpected EOF", err: errors.New("unexpected eof"), want: true},
+		{name: "connection reset", err: &net.OpError{Op: "read", Err: os.NewSyscallError("read", syscall.ECONNRESET)}, want: true},
+		{name: "connection refused", err: &net.OpError{Op: "dial", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}, want: true},
+		{name: "i/o timeout", err: &net.OpError{Op: "read", Err: os.ErrDeadlineExceeded}, want: true},
+		{name: "no such host", err: &net.DNSError{Err: "no such host", IsNotFound: true}, want: true},
+		{name: "unexpected EOF", err: fmt.Errorf("reading layer: %w", io.ErrUnexpectedEOF), want: true},
+		{name: "context deadline exceeded", err: fmt.Errorf("fetch: %w", context.DeadlineExceeded), want: true},
+		{name: "non-timeout net error", err: &net.OpError{Op: "read", Err: errors.New("protocol error")}, want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

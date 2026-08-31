@@ -3,6 +3,8 @@ package oras
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,10 +13,39 @@ import (
 	"time"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/vmvarela/terraform-provider-oras/internal/httputil"
 	orasRemote "oras.land/oras-go/v2/registry/remote"
 	orasAuth "oras.land/oras-go/v2/registry/remote/auth"
 )
+
+// BuildHTTPClient constructs an *http.Client with the specified TLS settings.
+// When insecure is true, certificate verification is disabled.
+// When caFile is non-empty, it is loaded as the trusted CA pool.
+func BuildHTTPClient(insecure bool, caFile string) (*http.Client, error) {
+	transport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		transport = &http.Transport{}
+	}
+	t := transport.Clone()
+
+	if t.TLSClientConfig == nil {
+		t.TLSClientConfig = &tls.Config{} //nolint:gosec
+	}
+	t.TLSClientConfig.InsecureSkipVerify = insecure //nolint:gosec // intentional per user config
+
+	if caFile != "" {
+		pem, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("reading ca_file %q: %w", caFile, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("ca_file %q: no valid PEM certificates found", caFile)
+		}
+		t.TLSClientConfig.RootCAs = pool
+	}
+
+	return &http.Client{Transport: t}, nil
+}
 
 // Version is the provider version, set at build time via -ldflags (e.g. -X 'oras.Version=1.0.0').
 // Defaults to "dev" for development builds.
@@ -118,7 +149,7 @@ func newORASRepositoryClient(registry, repository string, cfg Config) (*orasRepo
 	if cfg.HTTPClient != nil {
 		httpClient = cfg.HTTPClient
 	} else {
-		httpClient, err = httputil.BuildHTTPClient(cfg.Insecure, cfg.CAFile)
+		httpClient, err = BuildHTTPClient(cfg.Insecure, cfg.CAFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create HTTP client: %w", err)
 		}

@@ -20,10 +20,10 @@ import (
 	"net"
 	"net/http"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -86,6 +86,9 @@ type LockInfo struct {
 	// Path is the state path for this lock.
 	Path string `json:"Path"`
 }
+
+// errStateLocked is the contention error carried inside a *LockError.
+var errStateLocked = errors.New("state is locked")
 
 // LockError is returned when a state lock operation fails due to contention.
 type LockError struct {
@@ -340,26 +343,23 @@ func (wc *workspaceClient) lock(ctx context.Context, info *LockInfo) (string, er
 	}
 
 	var currentGen *LockManifestData
-	var existingDesc ocispec.Descriptor
 	lockM, lockDesc, err := wc.fetchManifestWithDesc(ctx, wc.lockTag)
 	if err != nil && !isNotFound(err) {
 		return "", fmt.Errorf("failed to read current lock state: %w", err)
 	}
 	if err == nil {
 		currentGen, _ = parseLockManifestData(&lockM)
-		existingDesc = lockDesc
 
 		existing, parseErr := parseLockInfo(&lockM, wc.stateTag)
 		if parseErr != nil {
 			return "", fmt.Errorf("failed to parse current lock info: %w", parseErr)
 		}
 		if existing != nil && existing.ID != "" {
-			if wc.isLockStale(currentGen) {
-				if err := wc.clearLock(ctx, existingDesc); err != nil {
-					return "", err
-				}
-			} else {
-				return "", &LockError{Info: existing, Err: fmt.Errorf("state is locked")}
+			if !wc.isLockStale(currentGen) {
+				return "", &LockError{Info: existing, Err: errStateLocked}
+			}
+			if err := wc.clearLock(ctx, lockDesc); err != nil {
+				return "", err
 			}
 		}
 	}
@@ -380,34 +380,32 @@ func (wc *workspaceClient) lock(ctx context.Context, info *LockInfo) (string, er
 		return "", err
 	}
 
-	manifestDesc, err := wc.packLockManifestWithGeneration(ctx, info.ID, string(infoBytes), newGeneration, leaseExpiry, info.ID)
+	manifestDesc, err := wc.packLockManifest(ctx, string(infoBytes), newGeneration, leaseExpiry, info.ID)
 	if err != nil {
 		return "", err
 	}
 
-	err = retry(ctx, func(ctx context.Context) error {
+	if err := retry(ctx, func(ctx context.Context) error {
 		return wc.client.repoClient.inner.Tag(ctx, manifestDesc, wc.lockTag)
-	})
-	if err != nil {
-		if _, resolveErr := wc.client.repoClient.inner.Resolve(ctx, wc.lockTag); resolveErr == nil {
-			existing, _ := wc.getLockInfo(ctx)
-			return "", &LockError{Info: existing, Err: fmt.Errorf("state is locked")}
+	}); err != nil {
+		if held, _, fetchErr := wc.fetchManifestWithDesc(ctx, wc.lockTag); fetchErr == nil {
+			existing, _ := parseLockInfo(&held, wc.stateTag)
+			return "", &LockError{Info: existing, Err: errStateLocked}
 		}
 		return "", err
 	}
 
-	// Post-write verification: ensure we actually hold the lock.
-	verified, verifyErr := wc.getLockManifestData(ctx)
-	if verifyErr != nil {
-		if cleanupDesc, cleanupErr := wc.client.repoClient.inner.Resolve(ctx, wc.lockTag); cleanupErr == nil {
-			if cleanupDesc.Digest == manifestDesc.Digest {
-				_ = wc.client.repoClient.inner.Delete(ctx, cleanupDesc)
-			}
+	// Post-write verification: one fetch, both parses — ensure we hold the lock.
+	held, _, err := wc.fetchManifestWithDesc(ctx, wc.lockTag)
+	if err != nil {
+		if cleanupDesc, cleanupErr := wc.client.repoClient.inner.Resolve(ctx, wc.lockTag); cleanupErr == nil && cleanupDesc.Digest == manifestDesc.Digest {
+			_ = wc.client.repoClient.inner.Delete(ctx, cleanupDesc)
 		}
-		return "", fmt.Errorf("failed to verify lock acquisition: %w", verifyErr)
+		return "", fmt.Errorf("failed to verify lock acquisition: %w", err)
 	}
+	verified, _ := parseLockManifestData(&held)
 	if verified == nil || verified.Generation != newGeneration || verified.HolderID != info.ID {
-		existing, _ := wc.getLockInfo(ctx)
+		existing, _ := parseLockInfo(&held, wc.stateTag)
 		return "", &LockError{Info: existing, Err: fmt.Errorf("state is locked (lost race)")}
 	}
 
@@ -480,7 +478,9 @@ func (wc *workspaceClient) packStateManifest(ctx context.Context, layers []ocisp
 	})
 }
 
-func (wc *workspaceClient) packLockManifestWithGeneration(ctx context.Context, id, infoJSON string, generation int64, leaseExpiry int64, holderID string) (ocispec.Descriptor, error) {
+// packLockManifest builds a lock manifest. holderID doubles as the lock ID
+// annotation — the two are always the same value.
+func (wc *workspaceClient) packLockManifest(ctx context.Context, infoJSON string, generation, leaseExpiry int64, holderID string) (ocispec.Descriptor, error) {
 	lockData := LockManifestData{
 		Generation:  generation,
 		LeaseExpiry: leaseExpiry,
@@ -494,7 +494,7 @@ func (wc *workspaceClient) packLockManifestWithGeneration(ctx context.Context, i
 	return oras.PackManifest(ctx, wc.client.repoClient.inner, oras.PackManifestVersion1_1, artifactTypeLock, oras.PackManifestOptions{
 		ManifestAnnotations: map[string]string{
 			annotationWorkspace: wc.stateID,
-			annotationLockID:    id,
+			annotationLockID:    holderID,
 			annotationLockInfo:  infoJSON,
 			annotationLockGen:   string(lockDataJSON),
 		},
@@ -568,7 +568,7 @@ func (wc *workspaceClient) enforceVersionRetention(ctx context.Context, current 
 		return nil
 	}
 
-	sort.Ints(versions)
+	slices.Sort(versions)
 	toDeleteCount := len(versions) - wc.client.config.MaxVersions
 	deleteVersions := versions[:toDeleteCount]
 	keepVersions := versions[toDeleteCount:]
@@ -733,7 +733,7 @@ func (wc *workspaceClient) retagToUnlocked(ctx context.Context) error {
 		return wc.client.repoClient.inner.Resolve(ctx, wc.unlockedTag)
 	})
 	if isNotFound(err) {
-		desc, err = wc.packLockManifestWithGeneration(ctx, "", "", 0, 0, "")
+		desc, err = wc.packLockManifest(ctx, "", 0, 0, "")
 		if err != nil {
 			return err
 		}
@@ -748,22 +748,6 @@ func (wc *workspaceClient) retagToUnlocked(ctx context.Context) error {
 	return retry(ctx, func(ctx context.Context) error {
 		return wc.client.repoClient.inner.Tag(ctx, desc, wc.lockTag)
 	})
-}
-
-func (wc *workspaceClient) getLockInfo(ctx context.Context) (*LockInfo, error) {
-	fm, _, err := wc.fetchManifestWithDesc(ctx, wc.lockTag)
-	if err != nil {
-		return nil, err
-	}
-	return parseLockInfo(&fm, wc.stateTag)
-}
-
-func (wc *workspaceClient) getLockManifestData(ctx context.Context) (*LockManifestData, error) {
-	fm, _, err := wc.fetchManifestWithDesc(ctx, wc.lockTag)
-	if err != nil {
-		return nil, err
-	}
-	return parseLockManifestData(&fm)
 }
 
 func (wc *workspaceClient) fetchManifestWithDesc(ctx context.Context, reference string) (ocispec.Manifest, ocispec.Descriptor, error) {
@@ -896,7 +880,7 @@ func listWorkspacesFromTags(ctx context.Context, repo *orasRepositoryClient) ([]
 		}
 	}
 
-	sort.Strings(out)
+	slices.Sort(out)
 	return slices.Compact(out), nil
 }
 
@@ -1011,6 +995,9 @@ func retryWithResult[T any](ctx context.Context, operation func(context.Context)
 	return zero, lastErr
 }
 
+// isTransientError reports whether err is worth retrying: a retryable HTTP
+// status, a network-level reset/refusal/DNS failure, a timeout, or a truncated
+// read.
 func isTransientError(err error) bool {
 	if err == nil {
 		return false
@@ -1029,33 +1016,26 @@ func isTransientError(err error) bool {
 		return false
 	}
 
+	switch {
+	case errors.Is(err, syscall.ECONNRESET),
+		errors.Is(err, syscall.ECONNREFUSED),
+		errors.Is(err, io.ErrUnexpectedEOF),
+		errors.Is(err, io.EOF),
+		errors.Is(err, context.DeadlineExceeded):
+		return true
+	}
+
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+
 	var netErr net.Error
 	if errors.As(err, &netErr) {
 		return netErr.Timeout()
 	}
 
-	msg := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(msg, "connection reset"):
-		return true
-	case strings.Contains(msg, "connection refused"):
-		return true
-	case strings.Contains(msg, "i/o timeout"),
-		strings.Contains(msg, "connection timeout"),
-		strings.Contains(msg, "tls handshake timeout"),
-		strings.Contains(msg, "context deadline exceeded"):
-		return true
-	case strings.Contains(msg, "temporary failure in name resolution"):
-		return true
-	case strings.Contains(msg, "no such host"):
-		return true
-	case strings.Contains(msg, "unexpected eof"),
-		strings.Contains(msg, "read: eof"),
-		msg == "eof":
-		return true
-	default:
-		return false
-	}
+	return false
 }
 
 // ─── Error helpers ────────────────────────────────────────────────────────────

@@ -6,222 +6,110 @@ description: |-
 
 # Authentication
 
-The `oras` provider supports multiple authentication methods for accessing OCI registries. Credentials are resolved with a defined priority order, allowing flexible configuration for different environments.
+Credentials are resolved in priority order. The first source that yields a credential wins.
 
-## Credential Resolution Order
+| Priority | Method | Scope |
+|----------|--------|-------|
+| 1 | `ORAS_TOKEN` | Any registry |
+| 2 | `GHCR_TOKEN`, then `GITHUB_TOKEN` | ghcr.io only |
+| 3 | Configured credentials (below) | Any registry, path-aware |
+| 4 | Anonymous | Public repositories |
 
-The provider resolves credentials in the following priority order:
-
-| Priority | Method | Scope | Description |
-|----------|--------|-------|-------------|
-| 1 | `ORAS_TOKEN` | Any registry | Universal token via environment variable |
-| 2 | `GHCR_TOKEN` / `GITHUB_TOKEN` | ghcr.io only | GitHub Container Registry specific tokens |
-| 3 | Configured credentials | Any registry (path-aware) | CLI config `oci_credentials` blocks (`.terraformrc` / `TF_CLI_CONFIG_FILE` / `TERRAFORM_CONFIG`), Docker config files (`~/.docker/config.json`, `containers/auth.json`), and Docker credential helpers — all pooled together; the **most specific match wins** (more repository path segments beats domain-only beats global fallback), CLI config wins ties |
-| 4 | Anonymous | Public repos | No credentials (public repositories only) |
-
-Configured-credential keys match the registry domain exactly plus a segment-wise path prefix (`ghcr.io/org` matches `ghcr.io/org/app` but not `ghcr.io/orgx/...`); there is no wildcard matching.
-
-> **Note:** The provider does not currently support provider-level `username`/`password` or `token` arguments in the Terraform configuration. Credentials must come from the sources above.
-
-## CLI Config (`oci_credentials` blocks)
-
-The provider reads `oci_credentials` blocks from the Terraform CLI config file (discovered via `TF_CLI_CONFIG_FILE`, then `TERRAFORM_CONFIG`, then `~/.terraformrc`):
-
-```hcl
-# ~/.terraformrc
-oci_credentials "ghcr.io" {
-  username = "your-user"
-  password = "your-token"
-}
-
-# Or a bearer token:
-oci_credentials "registry.example.com" {
-  access_token = "your-token"
-}
-
-# Or delegate to a Docker credential helper:
-oci_credentials "ghcr.io" {
-  docker_credentials_helper = "osxkeychain"
-}
-
-oci_default_credentials {
-  docker_credentials_helper = "desktop"  # global fallback for unmatched registries
-}
-```
-
-The config key supports an optional repository path prefix (`"ghcr.io/myorg"`), matching only repositories under that path.
-
-## Docker Config Files and Credential Helpers
-
-The provider also discovers credentials ambiently, like the Docker CLI:
-
-1. `$XDG_RUNTIME_DIR/containers/auth.json` (if set)
-2. `~/.config/containers/auth.json`
-3. `$XDG_CONFIG_HOME/containers/auth.json` (default `~/.config`)
-4. `~/.docker/config.json`
-
-Supported keys: `auths` (base64 `username:password` entries), `credHelpers` (per-domain helper), `credsStore` (global helper). Helpers are invoked as `docker-credential-<name> get` with a 30s timeout; a helper that reports "not found" is skipped (falling through to the next source). Malformed config files are logged and skipped — the provider never fails resolution; it falls through to anonymous.
+There are no provider-level `username` / `password` / `token` arguments — credentials never live in
+your Terraform configuration.
 
 ## Environment Variables
 
-### `ORAS_TOKEN` (Recommended)
-
-Universal token that works with any OCI-compatible registry:
+`ORAS_TOKEN` is the portable choice and works with every OCI registry:
 
 ```bash
 export ORAS_TOKEN=your-registry-token
 ```
 
-This is the preferred method for CI/CD pipelines and works across all registry types (GHCR, Docker Hub, Harbor, Zot, etc.).
+For ghcr.io, `GHCR_TOKEN` and `GITHUB_TOKEN` are also checked. Required scopes:
 
-### `GHCR_TOKEN` / `GITHUB_TOKEN`
+- `read:packages` — read state
+- `write:packages` — write state
+- `delete:packages` — **required for `max_versions` retention.** GHCR returns HTTP 405 on manifest
+  deletion, so the provider falls back to the GitHub Packages API. Without this scope, writes
+  succeed but pruning fails.
 
-For GitHub Container Registry (ghcr.io), you can use either:
+## Configured Credentials
 
-```bash
-# GHCR-specific token (recommended)
-export GHCR_TOKEN=ghp_xxxxxxxxxxxx
+Three sources are pooled together and matched against the registry domain and repository path. The
+**most specific key wins** — more matching path segments beats domain-only, which beats the global
+fallback. CLI config wins ties. Keys match exactly; there is no wildcard support.
 
-# Or use a classic GitHub Personal Access Token
-export GITHUB_TOKEN=ghp_xxxxxxxxxxxx
-```
+### CLI config `oci_credentials` blocks
 
-These are only checked when the registry hostname is `ghcr.io`.
-
-#### Required GHCR Token Scopes
-
-For full functionality including state retention (pruning old versions), the token needs:
-
-- `read:packages` — Read state from registry
-- `write:packages` — Write state to registry
-- `delete:packages` — **Required** for `max_versions` retention to work (GHCR returns HTTP 405 on manifest deletion, requiring the GitHub Packages API)
-
-Without `delete:packages`, the provider will write state successfully but version pruning will fail silently.
-
-## Per-Registry Configuration
-
-### GHCR (ghcr.io)
-
-```bash
-export GHCR_TOKEN=ghp_xxxxxxxxxxxx
-# Or
-export GITHUB_TOKEN=ghp_xxxxxxxxxxxx
-```
-
-### Docker Hub
-
-```bash
-export ORAS_TOKEN=your-docker-hub-access-token
-```
-
-### Harbor / Self-Hosted Registries
-
-```bash
-export ORAS_TOKEN=your-harbor-token
-```
-
-### Anonymous Access
-
-For public repositories, no credentials are needed:
-
-```bash
-# No environment variables required
-terraform init
-```
-
-## Provider-Level TLS Configuration
-
-While credentials come from environment variables, TLS settings are configured in the provider block:
+Read from `TF_CLI_CONFIG_FILE`, then `TERRAFORM_CONFIG`, then `~/.terraformrc`:
 
 ```hcl
-provider "oras" {
-  # Skip TLS verification (for local registries like Zot on HTTP)
-  insecure = true
+oci_credentials "ghcr.io" {
+  username = "your-user"
+  password = "your-token"
+}
 
-  # Custom CA bundle for private registries with self-signed certs
-  ca_file  = "/path/to/ca-bundle.pem"
+oci_credentials "registry.example.com" {
+  access_token = "your-token"
+}
+
+oci_credentials "ghcr.io/myorg" {          # only repos under myorg/
+  docker_credentials_helper = "osxkeychain"
+}
+
+oci_default_credentials {
+  docker_credentials_helper = "desktop"     # global fallback
 }
 ```
 
-| Argument   | Type | Default | Description |
-|------------|:----:|---------|-------------|
-| `insecure` | bool | `false` | Skip TLS certificate verification |
-| `ca_file`  | string | — | Path to PEM-encoded CA certificate bundle |
+Each block must use exactly one credential group: `username`+`password`, `access_token`, or
+`docker_credentials_helper`.
 
-## CI/CD Examples
+### Docker config files
 
-### GitHub Actions (GHCR)
+Searched in order:
+
+1. `$XDG_CONFIG_HOME/containers/auth.json` (default `~/.config`)
+2. `~/.docker/config.json`
+
+Supported keys: `auths` (base64 `username:password`), `credHelpers` (per-domain), `credsStore`
+(global).
+
+### Credential helpers
+
+Invoked as `docker-credential-<name> get` with a 30s timeout. A helper reporting "not found" is
+skipped and resolution falls through. Malformed config files are logged and skipped — resolution
+never fails, it degrades to anonymous.
+
+## TLS
+
+Credentials come from the sources above; TLS lives in the provider block:
+
+```hcl
+provider "oras" {
+  insecure = true                            # plain HTTP / skip verification (local dev)
+  ca_file  = "/path/to/ca-bundle.pem"        # self-signed registries
+}
+```
+
+## CI Example
 
 ```yaml
 env:
   TF_ENABLE_PLUGGABLE_STATE_STORAGE: "1"
   GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-steps:
-  - uses: actions/checkout@v4
-  - uses: hashicorp/setup-terraform@v3
-  - run: terraform init
-  - run: terraform apply -auto-approve
 ```
 
-### GitLab CI (Any Registry)
-
-```yaml
-variables:
-  TF_ENABLE_PLUGGABLE_STATE_STORAGE: "1"
-  ORAS_TOKEN: $CI_REGISTRY_PASSWORD
-
-before_script:
-  - terraform init
-
-script:
-  - terraform apply -auto-approve
-```
-
-### Generic CI with ORAS_TOKEN
-
-```bash
-export TF_ENABLE_PLUGGABLE_STATE_STORAGE=1
-export ORAS_TOKEN=$REGISTRY_TOKEN
-terraform init
-terraform apply
-```
+The default Actions `GITHUB_TOKEN` has `read:packages` and `write:packages` but **not**
+`delete:packages` — use a PAT if you need retention.
 
 ## Troubleshooting
 
-### "Authentication required" / 401 Errors
+**401 / "authentication required"** — check the variable name, the token scopes, and expiry. For
+ghcr.io, confirm the token can see the package.
 
-1. Verify the token is set in the correct environment variable
-2. Check token scopes (especially `delete:packages` for GHCR)
-3. Ensure the token hasn't expired
-4. For GHCR, verify the repository exists and token has access
+**405 on delete** — expected on GHCR. The Packages API fallback needs `delete:packages`.
 
-### "Manifest deletion not supported" / 405 Errors on GHCR
-
-This is expected behavior. The provider automatically falls back to the GitHub Packages API, but this requires the `delete:packages` scope on your token. Without it, version pruning (`max_versions`) will not work.
-
-### TLS Certificate Errors
-
-For registries with self-signed certificates:
-
-```hcl
-provider "oras" {
-  ca_file = "/etc/ssl/certs/my-registry-ca.pem"
-}
-```
-
-For local development with plain HTTP (e.g., Zot):
-
-```hcl
-provider "oras" {
-  insecure = true
-}
-```
-
-## Security Best Practices
-
-1. **Never hardcode tokens** in Terraform configuration files
-2. **Use short-lived tokens** in CI/CD pipelines (GitHub Actions `GITHUB_TOKEN` is ideal)
-3. **Scope tokens minimally** — only grant `read:packages`, `write:packages`, and `delete:packages` as needed
-4. **Rotate tokens regularly** — especially for long-running environments
-5. **Use `ORAS_TOKEN`** for portability across registry providers
+**`x509: certificate signed by unknown authority`** — set `ca_file`, or `insecure = true` for local
+plain-HTTP registries.

@@ -17,8 +17,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/statestore"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
-	"github.com/vmvarela/terraform-provider-oras/internal/httputil"
-	"github.com/vmvarela/terraform-provider-oras/internal/providerdata"
+	"github.com/vmvarela/terraform-provider-oras/internal/oras"
 	ocistatestore "github.com/vmvarela/terraform-provider-oras/internal/statestore"
 )
 
@@ -28,10 +27,6 @@ var (
 	_ provider.ProviderWithStateStores    = (*OrasProvider)(nil)
 	_ provider.ProviderWithValidateConfig = (*OrasProvider)(nil)
 )
-
-// ProviderData holds provider-level configuration forwarded to state stores
-// via ConfigureResponse.StateStoreData.
-type ProviderData = providerdata.ProviderData
 
 // OrasProvider implements provider.Provider and provider.ProviderWithStateStores.
 type OrasProvider struct{}
@@ -113,21 +108,18 @@ func (p *OrasProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 		caFile = cfg.CAFile.ValueString()
 	}
 
-	httpClient, err := httputil.BuildHTTPClient(insecure, caFile)
+	httpClient, err := oras.BuildHTTPClient(insecure, caFile)
 	if err != nil {
 		resp.Diagnostics.AddError("Failed to create HTTP client", err.Error())
 		return
 	}
 
-	pd := &ProviderData{
-		Insecure:   insecure,
-		CAFile:     caFile,
-		HTTPClient: httpClient,
-	}
-
 	// Share the same ProviderData with state stores. The provider has zero
 	// resources and data sources, so ResourceData/DataSourceData are not set.
-	resp.StateStoreData = pd
+	resp.StateStoreData = &ocistatestore.ProviderData{
+		Insecure:   insecure,
+		HTTPClient: httpClient,
+	}
 }
 
 // DataSources returns no data sources; this is a state-store-only provider.
