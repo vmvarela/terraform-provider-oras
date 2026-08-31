@@ -35,11 +35,12 @@ func newRemoteClient(repo *orasRepositoryClient, workspace string) *workspaceCli
 		retentionWg:  sync.WaitGroup{},
 	}
 	return &workspaceClient{
-		client:      client,
-		stateID:     workspace,
-		stateTag:    stateTagPrefix + wsTag,
-		lockTag:     lockTagPrefix + wsTag,
-		unlockedTag: unlockedTagPrefix + wsTag,
+		client:         client,
+		stateID:        workspace,
+		stateTag:       stateTagPrefix + wsTag,
+		versionTagBase: stateVersionTagPrefix + wsTag,
+		lockTag:        lockTagPrefix + wsTag,
+		unlockedTag:    unlockedTagPrefix + wsTag,
 	}
 }
 
@@ -583,11 +584,12 @@ func TestRemoteClient_Delete_WithVersioning(t *testing.T) {
 		retentionSem: make(chan struct{}, 3),
 	}
 	c := &workspaceClient{
-		client:      client,
-		stateID:     "default",
-		stateTag:    stateTagPrefix + "default",
-		lockTag:     lockTagPrefix + "default",
-		unlockedTag: unlockedTagPrefix + "default",
+		client:         client,
+		stateID:        "default",
+		stateTag:       stateTagPrefix + "default",
+		versionTagBase: stateVersionTagPrefix + "default",
+		lockTag:        lockTagPrefix + "default",
+		unlockedTag:    unlockedTagPrefix + "default",
 	}
 
 	// Put several versions.
@@ -635,11 +637,12 @@ func TestRemoteClient_Put_VersioningTagsAndRetention(t *testing.T) {
 		retentionSem: make(chan struct{}, 3),
 	}
 	c := &workspaceClient{
-		client:      client,
-		stateID:     "default",
-		stateTag:    stateTagPrefix + "default",
-		lockTag:     lockTagPrefix + "default",
-		unlockedTag: unlockedTagPrefix + "default",
+		client:         client,
+		stateID:        "default",
+		stateTag:       stateTagPrefix + "default",
+		versionTagBase: stateVersionTagPrefix + "default",
+		lockTag:        lockTagPrefix + "default",
+		unlockedTag:    unlockedTagPrefix + "default",
 	}
 
 	// Put three states; versioning keeps only the last 2.
@@ -696,11 +699,12 @@ func TestRemoteClient_RetagToNewManifest_PreservesVersionAnnotation(t *testing.T
 		retentionSem: make(chan struct{}, 3),
 	}
 	c := &workspaceClient{
-		client:      client,
-		stateID:     "default",
-		stateTag:    stateTagPrefix + "default",
-		lockTag:     lockTagPrefix + "default",
-		unlockedTag: unlockedTagPrefix + "default",
+		client:         client,
+		stateID:        "default",
+		stateTag:       stateTagPrefix + "default",
+		versionTagBase: stateVersionTagPrefix + "default",
+		lockTag:        lockTagPrefix + "default",
+		unlockedTag:    unlockedTagPrefix + "default",
 	}
 
 	if err := c.put(ctx, []byte("state-data")); err != nil {

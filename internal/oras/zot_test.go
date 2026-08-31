@@ -347,7 +347,7 @@ func TestZotIntegration_Retention(t *testing.T) {
 	c.WaitForRetention()
 
 	// Count version tags; must not exceed maxVersions.
-	prefix := stateTagPrefix + "default" + stateVersionTagSeparator
+	prefix := stateVersionTagPrefix + "default" + stateVersionTagSeparator
 	versionTags := countZotVersionTags(t, addr, "ghoten-test/retention", prefix)
 	if versionTags > maxVersions {
 		t.Errorf("expected ≤%d version tags, found %d", maxVersions, versionTags)

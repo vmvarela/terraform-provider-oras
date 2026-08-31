@@ -16,9 +16,51 @@ The provider resolves credentials in the following priority order:
 |----------|--------|-------|-------------|
 | 1 | `ORAS_TOKEN` | Any registry | Universal token via environment variable |
 | 2 | `GHCR_TOKEN` / `GITHUB_TOKEN` | ghcr.io only | GitHub Container Registry specific tokens |
-| 3 | Anonymous | Public repos | No credentials (public repositories only) |
+| 3 | Configured credentials | Any registry (path-aware) | CLI config `oci_credentials` blocks (`.terraformrc` / `TF_CLI_CONFIG_FILE` / `TERRAFORM_CONFIG`), Docker config files (`~/.docker/config.json`, `containers/auth.json`), and Docker credential helpers — all pooled together; the **most specific match wins** (more repository path segments beats domain-only beats global fallback), CLI config wins ties |
+| 4 | Anonymous | Public repos | No credentials (public repositories only) |
 
-> **Note:** The provider does not currently support provider-level `username`/`password` or `token` arguments in the Terraform configuration. Credentials must be provided via environment variables.
+Configured-credential keys match the registry domain exactly plus a segment-wise path prefix (`ghcr.io/org` matches `ghcr.io/org/app` but not `ghcr.io/orgx/...`); there is no wildcard matching.
+
+> **Note:** The provider does not currently support provider-level `username`/`password` or `token` arguments in the Terraform configuration. Credentials must come from the sources above.
+
+## CLI Config (`oci_credentials` blocks)
+
+For parity with the ghoten backend, the provider reads `oci_credentials` blocks from the Terraform CLI config file (discovered via `TF_CLI_CONFIG_FILE`, then `TERRAFORM_CONFIG`, then `~/.terraformrc`):
+
+```hcl
+# ~/.terraformrc
+oci_credentials "ghcr.io" {
+  username = "your-user"
+  password = "your-token"
+}
+
+# Or a bearer token:
+oci_credentials "registry.example.com" {
+  access_token = "your-token"
+}
+
+# Or delegate to a Docker credential helper:
+oci_credentials "ghcr.io" {
+  docker_credentials_helper = "osxkeychain"
+}
+
+oci_default_credentials {
+  docker_credentials_helper = "desktop"  # global fallback for unmatched registries
+}
+```
+
+The config key supports an optional repository path prefix (`"ghcr.io/myorg"`), matching only repositories under that path.
+
+## Docker Config Files and Credential Helpers
+
+The provider also discovers credentials ambiently, like the Docker CLI:
+
+1. `$XDG_RUNTIME_DIR/containers/auth.json` (if set)
+2. `~/.config/containers/auth.json`
+3. `$XDG_CONFIG_HOME/containers/auth.json` (default `~/.config`)
+4. `~/.docker/config.json`
+
+Supported keys: `auths` (base64 `username:password` entries), `credHelpers` (per-domain helper), `credsStore` (global helper). Helpers are invoked as `docker-credential-<name> get` with a 30s timeout; a helper that reports "not found" is skipped (falling through to the next source). Malformed config files are logged and skipped — the provider never fails resolution; it falls through to anonymous.
 
 ## Environment Variables
 

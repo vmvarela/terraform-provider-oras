@@ -14,7 +14,7 @@ make install           # build + copy to ~/.terraform.d/plugins/.../darwin_arm64
 
 - **Go 1.26**, **Terraform 1.17.0-alpha20260827** (`.terraform-version` via tfenv)
 - `TF_ENABLE_PLUGGABLE_STATE_STORAGE=1` required at runtime for Terraform to discover the experimental state store
-- Auth: `ORAS_TOKEN`, `GHCR_TOKEN`, or `GITHUB_TOKEN` env vars (checked in that priority order; see `resolveCredentials` in `internal/oras/auth.go`)
+- Auth: `ORAS_TOKEN`, `GHCR_TOKEN`, or `GITHUB_TOKEN` env vars (checked in that priority order), then CLI config `oci_credentials` blocks + Docker config files + Docker credential helpers, then anonymous (see `resolveCredentials` in `internal/oras/auth.go`, `internal/oras/credsource.go`, `internal/oras/dockerconfig.go`)
 - Dev overrides: symlink or point `.terraformrc.dev` at the repo, then `cp .terraformrc.dev ~/.terraformrc`
 
 ## Test
@@ -42,7 +42,7 @@ internal/oras/             → ORAS push/pull/lock/delete via oras-go v2
 internal/config/           → ProviderData shared type
 ```
 
-- OCI tag scheme: `state-<workspace>`, `state-<workspace>-v<N>`, `locked-<workspace>`, `unlocked-<workspace>` (GHCR fallback)
+- OCI tag scheme: `state-<workspace>`, `stver-<workspace>-v<N>`, `locked-<workspace>`, `unlocked-<workspace>` (GHCR fallback)
 - Lock uses generation-based optimistic concurrency; stale locks auto-cleared via TTL
 - Async retention goroutines (semaphore-limited, sem=3) prune old versions on Put
 - `Client.WaitForRetention()` blocks until all async retention completes — call before assertions in tests

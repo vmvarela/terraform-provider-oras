@@ -107,7 +107,7 @@ max_versions = 10
 | `1` | Keep only current state (no history) |
 | `N > 1` | Keep current + N-1 historical versions |
 
-**Version Tags:** Historical versions are stored as `state-<workspace>-v<N>` tags (e.g., `state-default-v1`, `state-default-v2`).
+**Version Tags:** Historical versions are stored as `stver-<workspace>-v<N>` tags (e.g., `stver-default-v1`, `stver-default-v2`).
 
 **Retention Mechanism:**
 - Runs asynchronously in a goroutine pool (max 3 concurrent)
@@ -137,14 +137,14 @@ Each Terraform workspace maps to its own set of tags in the repository:
 ```bash
 # Default workspace
 state-default
-state-default-v1, state-default-v2, ...
+stver-default-v1, stver-default-v2, ...
 locked-default / unlocked-default
 
 # Custom workspace
 terraform workspace new staging
 # Creates:
 state-staging
-state-staging-v1, state-staging-v2, ...
+stver-staging-v1, stver-staging-v2, ...
 locked-staging / unlocked-staging
 ```
 
@@ -168,7 +168,7 @@ The provider implements distributed locking using generation-based optimistic co
 
 When `max_versions > 0`, the retention logic:
 
-1. Lists all version tags for the workspace (`state-<ws>-v<N>`)
+1. Lists all version tags for the workspace (`stver-<ws>-v<N>`)
 2. Groups tags by underlying manifest digest (deduplicates identical states)
 3. Sorts versions numerically
 4. Calculates how many to delete: `total_versions - max_versions`

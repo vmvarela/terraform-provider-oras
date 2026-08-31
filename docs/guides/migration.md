@@ -173,7 +173,7 @@ After migration, verify:
 - [ ] `terraform state list` shows all managed resources
 - [ ] `terraform plan` shows no changes (no drift)
 - [ ] `terraform apply` succeeds without modifications
-- [ ] State appears in registry (check tags: `state-<workspace>`, `state-<workspace>-v1`)
+- [ ] State appears in registry (check tags: `state-<workspace>`, `stver-<workspace>-v1`)
 - [ ] Locking works: concurrent `terraform apply` shows lock conflict
 - [ ] Version retention works (if `max_versions > 0`): older versions pruned after new applies
 

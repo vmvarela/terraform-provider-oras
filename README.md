@@ -47,7 +47,8 @@ terraform apply
 ```
 
 That's it. Auth resolution: `ORAS_TOKEN` (any registry) → `GHCR_TOKEN`/`GITHUB_TOKEN`
-(ghcr.io only) → anonymous.
+(ghcr.io only) → CLI config `oci_credentials` blocks / Docker config files / Docker
+credential helpers → anonymous. See [docs/guides/authentication.md](docs/guides/authentication.md).
 
 ## Configuration
 
@@ -66,7 +67,7 @@ Provider-level: `insecure` (skip TLS — dev only) and `ca_file` (custom CA bund
 Each workspace maps to a set of OCI tags on the repository:
 
 - `state-<workspace>` — current state
-- `state-<workspace>-v<N>` — versioned snapshots (when `max_versions > 0`)
+- `stver-<workspace>-v<N>` — versioned snapshots (when `max_versions > 0`)
 - `locked-<workspace>` / `unlocked-<workspace>` — lock state
 
 Locking uses generation-based optimistic concurrency. Each `Lock` call increments

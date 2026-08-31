@@ -71,15 +71,25 @@ type orasRepository interface {
 // orasRepositoryClient wraps the ORAS repository client with additional
 // configuration for the state backend.
 type orasRepositoryClient struct {
-	repository string       // full reference: registry/repository
-	inner      orasRepository
-	token      string       // access token (for GHCR API calls)
-	httpClient *http.Client
+	repository   string             // full reference: registry/repository
+	inner        orasRepository
+	token        string             // access token (for GHCR API calls)
+	resolvedCred orasAuth.Credential // resolved credential, whatever path produced it
+	httpClient   *http.Client
 }
 
-// accessToken returns the access token for GHCR API calls.
+// accessToken returns the access token for GHCR API calls. Falls back to the
+// resolved credential (AccessToken, then Password) so that configured
+// credentials (CLI config, Docker config files, helpers) also work for the
+// GHCR delete fallback, not just env/explicit tokens.
 func (r *orasRepositoryClient) accessToken(_ context.Context) (string, error) {
-	return r.token, nil
+	if r.token != "" {
+		return r.token, nil
+	}
+	if r.resolvedCred.AccessToken != "" {
+		return r.resolvedCred.AccessToken, nil
+	}
+	return r.resolvedCred.Password, nil
 }
 
 // NewClient creates an ORAS client for the given registry and repository.
@@ -139,18 +149,21 @@ func newORASRepositoryClient(registry, repository string, cfg Config) (*orasRepo
 	// 1. Explicit token
 	// 2. Explicit username/password
 	// 3. Environment variables
-	cred, resolvedToken := resolveCredentials(registry, cfg)
+	// 4. Terraform CLI config / Docker config files
+	cred, resolvedToken, resolvedCred := resolveCredentials(registry, repository, cfg)
 
 	repo.Client = &orasAuth.Client{
 		Client:     httpClient,
 		Credential: cred,
+		Cache:      orasAuth.NewCache(),
 	}
 
 	return &orasRepositoryClient{
-		repository: fullRef,
-		inner:      repo,
-		token:      resolvedToken,
-		httpClient: httpClient,
+		repository:   fullRef,
+		inner:        repo,
+		token:        resolvedToken,
+		resolvedCred: resolvedCred,
+		httpClient:   httpClient,
 	}, nil
 }
 
@@ -163,7 +176,10 @@ func newORASRepositoryClient(registry, repository string, cfg Config) (*orasRepo
 //  4. For ghcr.io only:
 //     a. GHCR_TOKEN environment variable
 //     b. GITHUB_TOKEN environment variable
-//  5. Anonymous access (EmptyCredential)
+//  5. Configured credentials (Terraform CLI config oci_credentials blocks,
+//     Docker/containers config files, Docker credential helpers) resolved by
+//     specificity via resolveConfiguredCredential
+//  6. Anonymous access (EmptyCredential)
 //
 // Environment Variable Precedence:
 //   - ORAS_TOKEN: Universal token for any OCI registry
@@ -172,47 +188,50 @@ func newORASRepositoryClient(registry, repository string, cfg Config) (*orasRepo
 //
 // Pre:  registry is a non-empty hostname string.
 // Post: returns a non-nil CredentialFunc; the returned token is non-empty only
-//       when an access token was resolved (cases 1, 3, 4a, 4b above).
-func resolveCredentials(registry string, cfg Config) (orasAuth.CredentialFunc, string) {
+//       when an access token was resolved (cases 1, 3, 4a, 4b above); the
+//       returned Credential is the underlying credential regardless of which
+//       path resolved it (EmptyCredential for anonymous).
+func resolveCredentials(registry, repository string, cfg Config) (orasAuth.CredentialFunc, string, orasAuth.Credential) {
 	// Priority 1: Explicit token
 	if cfg.Token != "" {
-		return orasAuth.StaticCredential(registry, orasAuth.Credential{
-			AccessToken: cfg.Token,
-		}), cfg.Token
+		cred := orasAuth.Credential{AccessToken: cfg.Token}
+		return orasAuth.StaticCredential(registry, cred), cfg.Token, cred
 	}
 
 	// Priority 2: Explicit username/password
 	if cfg.Username != "" || cfg.Password != "" {
-		return orasAuth.StaticCredential(registry, orasAuth.Credential{
-			Username: cfg.Username,
-			Password: cfg.Password,
-		}), ""
+		cred := orasAuth.Credential{Username: cfg.Username, Password: cfg.Password}
+		return orasAuth.StaticCredential(registry, cred), "", cred
 	}
 
 	// Priority 3: Environment variable fallback
 	// Check ORAS_TOKEN (applies to any registry)
 	if t := os.Getenv("ORAS_TOKEN"); t != "" {
-		return orasAuth.StaticCredential(registry, orasAuth.Credential{
-			AccessToken: t,
-		}), t
+		cred := orasAuth.Credential{AccessToken: t}
+		return orasAuth.StaticCredential(registry, cred), t, cred
 	}
 
 	// For ghcr.io, also check GHCR_TOKEN and GITHUB_TOKEN
 	if registry == "ghcr.io" {
 		if t := os.Getenv("GHCR_TOKEN"); t != "" {
-			return orasAuth.StaticCredential(registry, orasAuth.Credential{
-				AccessToken: t,
-			}), t
+			cred := orasAuth.Credential{AccessToken: t}
+			return orasAuth.StaticCredential(registry, cred), t, cred
 		}
 		if t := os.Getenv("GITHUB_TOKEN"); t != "" {
-			return orasAuth.StaticCredential(registry, orasAuth.Credential{
-				AccessToken: t,
-			}), t
+			cred := orasAuth.Credential{AccessToken: t}
+			return orasAuth.StaticCredential(registry, cred), t, cred
 		}
 	}
 
+	// Priority 4: Configured credentials (Terraform CLI config, Docker config
+	// files, Docker credential helpers), matched by specificity against the
+	// registry domain and repository path.
+	if cred, ok := resolveConfiguredCredential(context.Background(), registry, repository); ok {
+		return orasAuth.StaticCredential(registry, cred), "", cred
+	}
+
 	// Fall back to anonymous access
-	return orasAuth.StaticCredential(registry, orasAuth.EmptyCredential), ""
+	return orasAuth.StaticCredential(registry, orasAuth.EmptyCredential), "", orasAuth.EmptyCredential
 }
 
 // userAgentRoundTripper wraps an http.RoundTripper to add a custom User-Agent

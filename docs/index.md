@@ -119,7 +119,7 @@ Each workspace maps to a set of OCI tags on the repository:
 | Tag Pattern | Purpose |
 |-------------|---------|
 | `state-<workspace>` | Current state |
-| `state-<workspace>-v<N>` | Versioned snapshots (when `max_versions > 0`) |
+| `stver-<workspace>-v<N>` | Versioned snapshots (when `max_versions > 0`) |
 | `locked-<workspace>` / `unlocked-<workspace>` | Lock state (GHCR fallback) |
 
 Locking uses generation-based optimistic concurrency. Each `Lock` call increments a counter on the lock manifest, so simultaneous attempts are detected reliably. Stale locks auto-expire after `lock_ttl` (checked on each Lock call, no background goroutines).

@@ -143,7 +143,7 @@ func (c *Client) List(ctx context.Context) ([]string, error)
 | Tag | Propósito |
 |---|---|
 | `state-<workspace>` | Estado actual |
-| `state-<workspace>-v<N>` | Versiones históricas |
+| `stver-<workspace>-v<N>` | Versiones históricas |
 | `locked-<workspace>` | Lock activo |
 
 ### Media types

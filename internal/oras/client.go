@@ -55,6 +55,7 @@ const defaultMaxStateSize int64 = 256 * 1024 * 1024
 
 // Tag naming scheme:
 //   - State is stored at "state-<workspaceTag>".
+//   - State versions are stored at "stver-<workspaceTag>-v<N>".
 //   - Lock is stored at "locked-<workspaceTag>".
 //   - On registries that don't support manifest deletion (GHCR returns 405),
 //     unlock retags to "unlocked-<workspaceTag>" instead.
@@ -62,6 +63,7 @@ const (
 	stateTagPrefix           = "state-"
 	lockTagPrefix            = "locked-"
 	unlockedTagPrefix        = "unlocked-"
+	stateVersionTagPrefix    = "stver-"
 	stateVersionTagSeparator = "-v"
 )
 
@@ -144,22 +146,24 @@ type fetchedManifest struct {
 // workspaceClient is an internal per-workspace OCI client, equivalent to
 // ghoten's RemoteClient. It is created per operation on Client.
 type workspaceClient struct {
-	client      *Client
-	stateID     string
-	stateTag    string
-	lockTag     string
-	unlockedTag string
+	client         *Client
+	stateID        string
+	stateTag       string
+	versionTagBase string
+	lockTag        string
+	unlockedTag    string
 }
 
 // newWorkspaceClient creates a workspaceClient for the given stateID (workspace name).
 func newWorkspaceClient(c *Client, stateID string) *workspaceClient {
 	wsTag := workspaceTagFor(stateID)
 	return &workspaceClient{
-		client:      c,
-		stateID:     stateID,
-		stateTag:    stateTagPrefix + wsTag,
-		lockTag:     lockTagPrefix + wsTag,
-		unlockedTag: unlockedTagPrefix + wsTag,
+		client:         c,
+		stateID:        stateID,
+		stateTag:       stateTagPrefix + wsTag,
+		versionTagBase: stateVersionTagPrefix + wsTag,
+		lockTag:        lockTagPrefix + wsTag,
+		unlockedTag:    unlockedTagPrefix + wsTag,
 	}
 }
 
@@ -523,7 +527,7 @@ func (wc *workspaceClient) packLockManifestWithGeneration(ctx context.Context, i
 }
 
 func (wc *workspaceClient) versionTagFor(version int) string {
-	return fmt.Sprintf("%s%s%d", wc.stateTag, stateVersionTagSeparator, version)
+	return fmt.Sprintf("%s%s%d", wc.versionTagBase, stateVersionTagSeparator, version)
 }
 
 func (wc *workspaceClient) currentStateVersion(ctx context.Context) int {
@@ -563,7 +567,7 @@ func (wc *workspaceClient) listExistingVersions(ctx context.Context) ([]int, err
 	var existing []int
 	for _, t := range tags {
 		base, v, ok := splitStateVersionTag(t)
-		if !ok || base != wc.stateTag {
+		if !ok || base != wc.versionTagBase {
 			continue
 		}
 		existing = append(existing, v)
@@ -890,20 +894,10 @@ func listWorkspacesFromTags(ctx context.Context, repo *orasRepositoryClient) ([]
 		return nil, err
 	}
 
-	tagSet := make(map[string]struct{}, len(tags))
-	for _, t := range tags {
-		tagSet[t] = struct{}{}
-	}
-
 	var out []string
 	for _, tag := range tags {
 		if !strings.HasPrefix(tag, stateTagPrefix) {
 			continue
-		}
-		if base, _, ok := splitStateVersionTag(tag); ok {
-			if _, ok := tagSet[base]; ok {
-				continue
-			}
 		}
 		name, err := workspaceNameFromTag(ctx, repo, tag)
 		if err != nil {
@@ -930,6 +924,9 @@ func listWorkspacesFromTags(ctx context.Context, repo *orasRepositoryClient) ([]
 }
 
 func splitStateVersionTag(tag string) (base string, version int, ok bool) {
+	if !strings.HasPrefix(tag, stateVersionTagPrefix) {
+		return "", 0, false
+	}
 	idx := strings.LastIndex(tag, stateVersionTagSeparator)
 	if idx < 0 {
 		return "", 0, false
@@ -981,7 +978,7 @@ func workspaceNameFromTag(ctx context.Context, repo *orasRepositoryClient, state
 	})
 }
 
-// compressGzip compresses data using gzip at BestSpeed level.
+// compressGzip compresses data using gzip at the default level.
 //
 // Pre:  data may be nil or empty (both produce valid gzip output).
 // Post: len(result) > 0; gzip.NewReader(bytes.NewReader(result)) succeeds and
