@@ -15,7 +15,7 @@ make install           # build + copy to ~/.terraform.d/plugins/.../darwin_arm64
 - **Go 1.26**, **Terraform 1.17.0-alpha20260827** (`.terraform-version` via tfenv)
 - `TF_ENABLE_PLUGGABLE_STATE_STORAGE=1` required at runtime for Terraform to discover the experimental state store
 - Auth: `ORAS_TOKEN`, `GHCR_TOKEN`, or `GITHUB_TOKEN` env vars (checked in that priority order), then CLI config `oci_credentials` blocks + Docker config files + Docker credential helpers, then anonymous (see `resolveCredentials` in `internal/oras/auth.go`, `internal/oras/credsource.go`, `internal/oras/dockerconfig.go`)
-- Dev overrides: symlink or point `.terraformrc.dev` at the repo, then `cp .terraformrc.dev ~/.terraformrc`
+- Dev overrides: `make dev-override` generates a gitignored `.terraformrc.dev` with this checkout's absolute path, then `export TF_CLI_CONFIG_FILE=$PWD/.terraformrc.dev` (scoped to the repo — don't overwrite `~/.terraformrc`, it may hold `oci_credentials` blocks)
 
 ## Test
 
@@ -48,8 +48,9 @@ internal/oras/             → ORAS push/pull/lock/delete via oras-go v2, auth, 
 
 ## Release / CI
 
-- CI: `.github/workflows/ci.yml` runs `go build ./...` + `go test -race -count=1 ./...` on ubuntu/macos/windows, plus `golangci-lint` v2.12
-- Release: GoReleaser (`.goreleaser.yml`) on tags `v*`, draft prerelease, optional GPG signature
+- CI: `.github/workflows/ci.yml` runs `go build ./...` + `go test -race -count=1 ./...` on ubuntu/macos/windows, plus `golangci-lint` v2.12, `govulncheck`, Zot/GHCR/Terraform integration jobs. `.github/workflows/codeql.yml` runs CodeQL weekly + on PR
+- Lint config: `.golangci.yml` (v2 format). gosec G304/G204 are excluded repo-wide (reading user-configured CA/Docker config paths and exec'ing credential helpers are core features); G118 excluded in `client.go` (retention goroutine deliberately outlives the request context)
+- Release: GoReleaser (`.goreleaser.yml`) on tags `v*`, non-draft release (`prerelease: auto`), optional GPG signature; release-drafter (`.github/workflows/release-drafter.yml`) owns the changelog (GoReleaser changelog disabled)
 - Functional example: `examples/main.tf` (Zot local + `insecure` provider)
 
 ## Notes
