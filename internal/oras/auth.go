@@ -191,10 +191,23 @@ func newORASRepositoryClient(registry, repository string, cfg Config) (*orasRepo
 //       when an access token was resolved (cases 1, 3, 4a, 4b above); the
 //       returned Credential is the underlying credential regardless of which
 //       path resolved it (EmptyCredential for anonymous).
+// tokenCredential converts a bearer-style token into a credential the
+// registry can actually authenticate. GHCR rejects tokens sent raw as
+// Bearer — oras-go skips the exchange when AccessToken is set — and
+// instead requires basic auth against its token endpoint; any non-empty
+// username is accepted (Docker CLI convention). Other registries keep the
+// AccessToken as-is.
+func tokenCredential(registry, token string) orasAuth.Credential {
+	if registry == "ghcr.io" {
+		return orasAuth.Credential{Username: "x", Password: token}
+	}
+	return orasAuth.Credential{AccessToken: token}
+}
+
 func resolveCredentials(registry, repository string, cfg Config) (orasAuth.CredentialFunc, string, orasAuth.Credential) {
 	// Priority 1: Explicit token
 	if cfg.Token != "" {
-		cred := orasAuth.Credential{AccessToken: cfg.Token}
+		cred := tokenCredential(registry, cfg.Token)
 		return orasAuth.StaticCredential(registry, cred), cfg.Token, cred
 	}
 
@@ -207,18 +220,18 @@ func resolveCredentials(registry, repository string, cfg Config) (orasAuth.Crede
 	// Priority 3: Environment variable fallback
 	// Check ORAS_TOKEN (applies to any registry)
 	if t := os.Getenv("ORAS_TOKEN"); t != "" {
-		cred := orasAuth.Credential{AccessToken: t}
+		cred := tokenCredential(registry, t)
 		return orasAuth.StaticCredential(registry, cred), t, cred
 	}
 
 	// For ghcr.io, also check GHCR_TOKEN and GITHUB_TOKEN
 	if registry == "ghcr.io" {
 		if t := os.Getenv("GHCR_TOKEN"); t != "" {
-			cred := orasAuth.Credential{AccessToken: t}
+			cred := tokenCredential(registry, t)
 			return orasAuth.StaticCredential(registry, cred), t, cred
 		}
 		if t := os.Getenv("GITHUB_TOKEN"); t != "" {
-			cred := orasAuth.Credential{AccessToken: t}
+			cred := tokenCredential(registry, t)
 			return orasAuth.StaticCredential(registry, cred), t, cred
 		}
 	}

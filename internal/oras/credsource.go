@@ -190,10 +190,13 @@ func cliBlockCredential(ctx context.Context, block cliCredentialBlock, domain st
 	case block.DockerCredentialsHelper != "":
 		return dockerHelperCredential(ctx, block.DockerCredentialsHelper, domain)
 	case block.AccessToken != "":
-		return orasAuth.Credential{
-			AccessToken:  block.AccessToken,
-			RefreshToken: block.RefreshToken,
-		}, true
+		cred := tokenCredential(domain, block.AccessToken)
+		if domain != "ghcr.io" {
+			// GHCR requires basic auth; a RefreshToken would push oras-go
+			// into the OAuth2 refresh grant, bypassing the exchange.
+			cred.RefreshToken = block.RefreshToken
+		}
+		return cred, true
 	default:
 		return orasAuth.Credential{Username: block.Username, Password: block.Password}, true
 	}

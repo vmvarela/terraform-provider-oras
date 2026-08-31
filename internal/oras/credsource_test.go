@@ -314,8 +314,10 @@ func TestLoadCLIConfig(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
+		// ghcr.io: basic auth (Username "x" + token as Password); RefreshToken
+		// intentionally dropped to avoid the OAuth2 refresh grant.
 		cred, ok := cliBlockCredential(context.Background(), cfg.Credentials[0], "ghcr.io")
-		if !ok || cred.AccessToken != "at" || cred.RefreshToken != "rt" {
+		if !ok || cred.Username != "x" || cred.Password != "at" || cred.RefreshToken != "" {
 			t.Errorf("got ok=%v cred=%+v", ok, cred)
 		}
 	})
@@ -431,7 +433,7 @@ func TestResolveCredentialsPrecedence(t *testing.T) {
 		t.Setenv("ORAS_TOKEN", "env-token")
 		t.Setenv("TF_CLI_CONFIG_FILE", tfrc)
 		fn, token, _ := resolveCredentials("ghcr.io", "org/app", Config{Token: "explicit"})
-		if token != "explicit" || credOf(fn).AccessToken != "explicit" {
+		if token != "explicit" || credOf(fn).Password != "explicit" {
 			t.Errorf("token priority broken: token=%q cred=%+v", token, credOf(fn))
 		}
 	})
@@ -440,7 +442,7 @@ func TestResolveCredentialsPrecedence(t *testing.T) {
 		t.Setenv("ORAS_TOKEN", "env-token")
 		t.Setenv("TF_CLI_CONFIG_FILE", tfrc)
 		fn, token, _ := resolveCredentials("ghcr.io", "org/app", Config{})
-		if token != "env-token" || credOf(fn).AccessToken != "env-token" {
+		if token != "env-token" || credOf(fn).Password != "env-token" {
 			t.Errorf("env priority broken: token=%q cred=%+v", token, credOf(fn))
 		}
 	})
