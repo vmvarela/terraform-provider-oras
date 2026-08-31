@@ -143,8 +143,8 @@ type fetchedManifest struct {
 	desc ocispec.Descriptor
 }
 
-// workspaceClient is an internal per-workspace OCI client, equivalent to
-// ghoten's RemoteClient. It is created per operation on Client.
+// workspaceClient is an internal per-workspace OCI client. It is created per
+// operation on Client.
 type workspaceClient struct {
 	client         *Client
 	stateID        string

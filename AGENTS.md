@@ -59,7 +59,6 @@ internal/config/           → ProviderData shared type
 
 ## Notes
 
-- ORAS client was originally ported from the `ghoten` fork; that fork was removed after the port and is no longer part of this repo
 - Provider has zero data sources and zero resources — state-store-only
 - Media types: `application/vnd.terraform.statefile.v1` (plain), `+gzip` (compressed)
 - Default max state size: 256 MiB

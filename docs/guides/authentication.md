@@ -25,7 +25,7 @@ Configured-credential keys match the registry domain exactly plus a segment-wise
 
 ## CLI Config (`oci_credentials` blocks)
 
-For parity with the ghoten backend, the provider reads `oci_credentials` blocks from the Terraform CLI config file (discovered via `TF_CLI_CONFIG_FILE`, then `TERRAFORM_CONFIG`, then `~/.terraformrc`):
+The provider reads `oci_credentials` blocks from the Terraform CLI config file (discovered via `TF_CLI_CONFIG_FILE`, then `TERRAFORM_CONFIG`, then `~/.terraformrc`):
 
 ```hcl
 # ~/.terraformrc

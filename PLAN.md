@@ -1,8 +1,7 @@
 # Plan: `terraform-provider-oras`
 
 > Plugin experimental de Terraform que implementa `statestore.StateStore` para almacenar
-> `tfstate` en OCI registries. El cliente ORAS se portó inicialmente desde el fork `ghoten`
-> (eliminado tras el port).
+> `tfstate` en OCI registries.
 
 ---
 
@@ -25,7 +24,7 @@
 |---|---|
 | **Fase 1** — Bootstrap (go.mod, main.go, dirs) | 🟢 Completada |
 | **Fase 2** — Provider skeleton (ProviderWithStateStores) | 🟢 Completada |
-| **Fase 3** — ORAS client (portado de ghoten, fork ya eliminado) | 🟢 Completada |
+| **Fase 3** — ORAS client | 🟢 Completada |
 | **Fase 4** — StateStore implementation | 🟢 Completada |
 | **Fase 5** — Testing (unit + Zot integration) | 🟢 Completada |
 | **Fase 6** — Build tooling y setup local | 🟢 Completada |
@@ -57,7 +56,7 @@ terraform-provider-oras/
 │   ├── config/
 │   │   └── config.go                # ProviderData compartido
 │   └── oras/
-│       ├── client.go                # ORAS client (portado de ghoten)
+│       ├── client.go                # ORAS client
 │       ├── auth.go                  # Resolución de credenciales OCI
 │       ├── ghcr.go                  # Fallback GHCR tag deletion
 │       ├── helper_test.go           # fakeORASRepo in-memory
@@ -110,12 +109,9 @@ func (p *OrasProvider) StateStores() []func() statestore.StateStore
 
 ---
 
-## Fase 3 — ORAS client (portado de ghoten)
+## Fase 3 — ORAS client
 
-### Fuente de referencia
-
-El cliente se portó desde el fork `ghoten/internal/backend/remote-state/oras/` (fork
-ya eliminado del repo tras el port). Archivos de origen:
+### Componentes
 
 | Archivo | Uso |
 |---|---|
@@ -138,7 +134,7 @@ func (c *Client) Unlock(ctx context.Context, stateID, lockID string) error
 func (c *Client) List(ctx context.Context) ([]string, error)
 ```
 
-### Tags OCI (misma convención que ghoten)
+### Tags OCI
 
 | Tag | Propósito |
 |---|---|
@@ -234,7 +230,7 @@ terraform init
 
 ### Unit tests (`internal/oras/*_test.go`)
 
-| Test | Fuente (ghoten) |
+| Test | Archivo |
 |---|---|
 | `fakeORASRepo` in-memory | `helper_test.go` |
 | `Put/Get/Delete` round-trip | `client_test.go` |
@@ -247,7 +243,7 @@ terraform init
 
 ### Integration tests (Zot registry)
 
-| Test | Fuente (ghoten) |
+| Test | Archivo |
 |---|---|
 | State round-trip | `zot_test.go` |
 | Lock/unlock concurrente | `zot_test.go` |
