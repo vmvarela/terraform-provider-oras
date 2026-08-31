@@ -24,8 +24,8 @@ import (
 
 // Compile-time interface checks.
 var (
-	_ provider.Provider                  = (*OrasProvider)(nil)
-	_ provider.ProviderWithStateStores   = (*OrasProvider)(nil)
+	_ provider.Provider                   = (*OrasProvider)(nil)
+	_ provider.ProviderWithStateStores    = (*OrasProvider)(nil)
 	_ provider.ProviderWithValidateConfig = (*OrasProvider)(nil)
 )
 
@@ -125,9 +125,8 @@ func (p *OrasProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 		HTTPClient: httpClient,
 	}
 
-	// Share the same ProviderData with resources, data sources, and state stores.
-	resp.ResourceData = pd
-	resp.DataSourceData = pd
+	// Share the same ProviderData with state stores. The provider has zero
+	// resources and data sources, so ResourceData/DataSourceData are not set.
 	resp.StateStoreData = pd
 }
 

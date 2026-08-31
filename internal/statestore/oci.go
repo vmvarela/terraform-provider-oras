@@ -83,8 +83,6 @@ func (s *OCIStateStore) Schema(_ context.Context, _ fwss.SchemaRequest, resp *fw
 	}
 }
 
-
-
 // Initialize parses the configuration, creates the ORAS client, and stores it
 // in InitializeResponse.StateStoreData for later retrieval via Configure.
 //
@@ -107,9 +105,7 @@ func (s *OCIStateStore) Initialize(ctx context.Context, req fwss.InitializeReque
 		return
 	}
 
-	orasCfg := oras.Config{
-		Compression: "none",
-	}
+	var orasCfg oras.Config
 
 	// Forward provider-level TLS settings to the ORAS client.
 	if pd, ok := req.ProviderData.(*providerdata.ProviderData); ok && pd != nil {
@@ -127,9 +123,7 @@ func (s *OCIStateStore) Initialize(ctx context.Context, req fwss.InitializeReque
 	}
 
 	if !cfg.Compression.IsNull() && !cfg.Compression.IsUnknown() {
-		if cfg.Compression.ValueBool() {
-			orasCfg.Compression = "gzip"
-		}
+		orasCfg.Compression = cfg.Compression.ValueBool()
 	}
 
 	if !cfg.LockTTL.IsNull() && !cfg.LockTTL.IsUnknown() {

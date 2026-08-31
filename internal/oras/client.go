@@ -19,13 +19,13 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"golang.org/x/sync/errgroup"
 	oras "oras.land/oras-go/v2"
@@ -67,9 +67,6 @@ const (
 	stateVersionTagSeparator = "-v"
 )
 
-// defaultRetentionSem limits concurrent async retention goroutines globally.
-var defaultRetentionSem = make(chan struct{}, 3)
-
 // ─── Exported types ───────────────────────────────────────────────────────────
 
 // LockInfo holds information about a state lock.
@@ -90,17 +87,12 @@ type LockInfo struct {
 	Path string `json:"Path"`
 }
 
-// LockError is returned when a state lock operation fails due to contention
-// or an inconsistent read.
+// LockError is returned when a state lock operation fails due to contention.
 type LockError struct {
 	// Info is the lock information of the current holder, if available.
 	Info *LockInfo
 	// Err is the underlying error.
 	Err error
-	// InconsistentRead indicates the lock state could not be reliably read,
-	// typically due to a race condition or network error during verification.
-	// Callers should treat this as a failed lock attempt and may retry.
-	InconsistentRead bool
 }
 
 // Error implements the error interface.
@@ -127,20 +119,6 @@ type LockManifestData struct {
 type digestGroup struct {
 	desc ocispec.Descriptor
 	tags []string
-}
-
-// manifest is the deserialized form of an OCI image manifest.
-type manifest struct {
-	ArtifactType string               `json:"artifactType"`
-	MediaType    string               `json:"mediaType"`
-	Annotations  map[string]string    `json:"annotations"`
-	Layers       []ocispec.Descriptor `json:"layers"`
-}
-
-// fetchedManifest bundles a parsed manifest with its OCI descriptor.
-type fetchedManifest struct {
-	m    *manifest
-	desc ocispec.Descriptor
 }
 
 // workspaceClient is an internal per-workspace OCI client. It is created per
@@ -178,22 +156,21 @@ func (c *Client) Get(ctx context.Context, stateID string) ([]byte, error) {
 }
 
 func (wc *workspaceClient) get(ctx context.Context) ([]byte, error) {
-	fm, err := wc.fetchManifestWithDesc(ctx, wc.stateTag)
+	fm, _, err := wc.fetchManifestWithDesc(ctx, wc.stateTag)
 	if err != nil {
 		if isNotFound(err) {
 			return nil, nil
 		}
 		return nil, err
 	}
-	m := fm.m
-	if m.ArtifactType != "" && m.ArtifactType != artifactTypeState {
-		return nil, fmt.Errorf("unexpected state manifest artifactType %q for %q", m.ArtifactType, wc.stateTag)
+	if fm.ArtifactType != "" && fm.ArtifactType != artifactTypeState {
+		return nil, fmt.Errorf("unexpected state manifest artifactType %q for %q", fm.ArtifactType, wc.stateTag)
 	}
-	if len(m.Layers) == 0 {
+	if len(fm.Layers) == 0 {
 		return nil, nil
 	}
 
-	layer := m.Layers[0]
+	layer := fm.Layers[0]
 	rc, err := wc.client.repoClient.inner.Fetch(ctx, layer)
 	if err != nil {
 		return nil, err
@@ -243,7 +220,7 @@ func (wc *workspaceClient) put(ctx context.Context, state []byte) error {
 	stateToPush := state
 	layerMediaType := mediaTypeStateLayer
 
-	if wc.client.config.Compression == "gzip" {
+	if wc.client.config.Compression {
 		compressed, err := compressGzip(state)
 		if err != nil {
 			return fmt.Errorf("compressing state: %w", err)
@@ -286,9 +263,6 @@ func (wc *workspaceClient) put(ctx context.Context, state []byte) error {
 	// cancelled, ensuring version retention limits are enforced regardless
 	// of the calling operation's lifecycle.
 	sem := wc.client.retentionSem
-	if sem == nil {
-		sem = defaultRetentionSem
-	}
 	select {
 	case sem <- struct{}{}:
 		wc.client.retentionWg.Add(1)
@@ -353,8 +327,9 @@ func (c *Client) Lock(ctx context.Context, stateID string, info LockInfo) (strin
 //
 // Pre:  ctx is non-nil; info is non-nil with a non-empty ID field.
 // Post: on success, returns info.ID and the lock tag references a manifest with
-//       Generation == previous_generation+1 and HolderID == info.ID.
-//       On failure with an existing lock, returns *LockError with Info populated.
+//
+//	Generation == previous_generation+1 and HolderID == info.ID.
+//	On failure with an existing lock, returns *LockError with Info populated.
 //
 // Bounding function (termination): the function does not loop; it performs at
 // most one stale-lock clear followed by one tag+verify attempt. All retries are
@@ -366,17 +341,17 @@ func (wc *workspaceClient) lock(ctx context.Context, info *LockInfo) (string, er
 
 	var currentGen *LockManifestData
 	var existingDesc ocispec.Descriptor
-	lockFetched, err := wc.fetchManifestWithDesc(ctx, wc.lockTag)
+	lockM, lockDesc, err := wc.fetchManifestWithDesc(ctx, wc.lockTag)
 	if err != nil && !isNotFound(err) {
 		return "", fmt.Errorf("failed to read current lock state: %w", err)
 	}
 	if err == nil {
-		currentGen, _ = parseLockManifestData(lockFetched.m)
-		existingDesc = lockFetched.desc
+		currentGen, _ = parseLockManifestData(&lockM)
+		existingDesc = lockDesc
 
-		existing, parseErr := parseLockInfo(lockFetched.m, wc.stateTag)
+		existing, parseErr := parseLockInfo(&lockM, wc.stateTag)
 		if parseErr != nil {
-			return "", &LockError{InconsistentRead: true, Err: parseErr}
+			return "", fmt.Errorf("failed to parse current lock info: %w", parseErr)
 		}
 		if existing != nil && existing.ID != "" {
 			if wc.isLockStale(currentGen) {
@@ -396,7 +371,7 @@ func (wc *workspaceClient) lock(ctx context.Context, info *LockInfo) (string, er
 
 	leaseExpiry := int64(0)
 	if wc.client.config.LockTTL > 0 {
-		leaseExpiry = wc.client.nowUTC().Add(wc.client.config.LockTTL).UnixNano()
+		leaseExpiry = time.Now().UTC().Add(wc.client.config.LockTTL).UnixNano()
 	}
 
 	info.Path = wc.stateTag
@@ -429,7 +404,7 @@ func (wc *workspaceClient) lock(ctx context.Context, info *LockInfo) (string, er
 				_ = wc.client.repoClient.inner.Delete(ctx, cleanupDesc)
 			}
 		}
-		return "", &LockError{InconsistentRead: true, Err: fmt.Errorf("failed to verify lock acquisition: %w", verifyErr)}
+		return "", fmt.Errorf("failed to verify lock acquisition: %w", verifyErr)
 	}
 	if verified == nil || verified.Generation != newGeneration || verified.HolderID != info.ID {
 		existing, _ := wc.getLockInfo(ctx)
@@ -446,7 +421,7 @@ func (c *Client) Unlock(ctx context.Context, stateID, lockID string) error {
 }
 
 func (wc *workspaceClient) unlock(ctx context.Context, id string) error {
-	fm, err := wc.fetchManifestWithDesc(ctx, wc.lockTag)
+	fm, desc, err := wc.fetchManifestWithDesc(ctx, wc.lockTag)
 	if err != nil {
 		if isNotFound(err) {
 			return nil
@@ -454,7 +429,7 @@ func (wc *workspaceClient) unlock(ctx context.Context, id string) error {
 		return err
 	}
 
-	existing, err := parseLockInfo(fm.m, wc.stateTag)
+	existing, err := parseLockInfo(&fm, wc.stateTag)
 	if err != nil {
 		return err
 	}
@@ -466,7 +441,7 @@ func (wc *workspaceClient) unlock(ctx context.Context, id string) error {
 	}
 
 	err = retry(ctx, func(ctx context.Context) error {
-		return wc.client.repoClient.inner.Delete(ctx, fm.desc)
+		return wc.client.repoClient.inner.Delete(ctx, desc)
 	})
 	if err == nil {
 		return nil
@@ -494,7 +469,7 @@ func (c *Client) WaitForRetention() {
 func (wc *workspaceClient) packStateManifest(ctx context.Context, layers []ocispec.Descriptor, stateVersion int) (ocispec.Descriptor, error) {
 	annotations := map[string]string{
 		annotationWorkspace: wc.stateID,
-		annotationUpdatedAt: wc.client.nowUTC().Format(time.RFC3339Nano),
+		annotationUpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	if stateVersion > 0 {
 		annotations[annotationStateVersion] = strconv.Itoa(stateVersion)
@@ -531,12 +506,11 @@ func (wc *workspaceClient) versionTagFor(version int) string {
 }
 
 func (wc *workspaceClient) currentStateVersion(ctx context.Context) int {
-	fm, err := wc.fetchManifestWithDesc(ctx, wc.stateTag)
+	fm, _, err := wc.fetchManifestWithDesc(ctx, wc.stateTag)
 	if err != nil {
 		return 0
 	}
-	m := fm.m
-	if v, ok := m.Annotations[annotationStateVersion]; ok {
+	if v, ok := fm.Annotations[annotationStateVersion]; ok {
 		n, parseErr := strconv.Atoi(v)
 		if parseErr == nil && n > 0 {
 			return n
@@ -579,9 +553,12 @@ func (wc *workspaceClient) listExistingVersions(ctx context.Context) ([]int, err
 // wc.client.config.MaxVersions versions.
 //
 // Pre:  wc.client.config.MaxVersions > 0; versions contains the list of known
-//       version numbers for this workspace.
+//
+//	version numbers for this workspace.
+//
 // Post: at most wc.client.config.MaxVersions versions remain in the registry;
-//       the current manifest (identified by current.Digest) is never deleted.
+//
+//	the current manifest (identified by current.Digest) is never deleted.
 //
 // Loop invariant (over groups): each group processed has its keep-tagged
 // manifests retagged to a new digest before the old digest is deleted.
@@ -605,7 +582,7 @@ func (wc *workspaceClient) enforceVersionRetention(ctx context.Context, current 
 		keepTagSet[wc.versionTagFor(v)] = struct{}{}
 	}
 
-	groups, err := wc.groupVersionsByDigest(ctx, versions, current.Digest)
+	groups, err := wc.groupVersionsByDigest(ctx, versions, current.Digest.String())
 	if err != nil {
 		return err
 	}
@@ -633,7 +610,7 @@ func (wc *workspaceClient) enforceVersionRetention(ctx context.Context, current 
 	return nil
 }
 
-func (wc *workspaceClient) groupVersionsByDigest(ctx context.Context, versions []int, currentDigest digest.Digest) (map[string]*digestGroup, error) {
+func (wc *workspaceClient) groupVersionsByDigest(ctx context.Context, versions []int, currentDigest string) (map[string]*digestGroup, error) {
 	var mu sync.Mutex
 	groups := make(map[string]*digestGroup)
 
@@ -644,7 +621,7 @@ func (wc *workspaceClient) groupVersionsByDigest(ctx context.Context, versions [
 		tag := wc.versionTagFor(v)
 		g.Go(func() error {
 			desc, err := wc.client.repoClient.inner.Resolve(ctx, tag)
-			if err != nil || desc.Digest == currentDigest {
+			if err != nil || desc.Digest.String() == currentDigest {
 				return nil //nolint:nilerr
 			}
 			key := desc.Digest.String()
@@ -682,23 +659,22 @@ func (wc *workspaceClient) retagToNewManifest(ctx context.Context, tags []string
 	}
 	slog.Debug("retention: detaching keep tags from digest", "tags", tags)
 
-	fm, err := wc.fetchManifestWithDesc(ctx, tags[0])
+	fm, _, err := wc.fetchManifestWithDesc(ctx, tags[0])
 	if err != nil {
 		return err
 	}
-	m := fm.m
-	if len(m.Layers) == 0 {
+	if len(fm.Layers) == 0 {
 		return nil
 	}
 
 	preservedVersion := 0
-	if v, ok := m.Annotations[annotationStateVersion]; ok {
+	if v, ok := fm.Annotations[annotationStateVersion]; ok {
 		if n, parseErr := strconv.Atoi(v); parseErr == nil && n > 0 {
 			preservedVersion = n
 		}
 	}
 
-	newDesc, err := wc.packStateManifest(ctx, m.Layers, preservedVersion)
+	newDesc, err := wc.packStateManifest(ctx, fm.Layers, preservedVersion)
 	if err != nil {
 		return err
 	}
@@ -736,7 +712,7 @@ func (wc *workspaceClient) isLockStale(data *LockManifestData) bool {
 	if data == nil || data.LeaseExpiry <= 0 {
 		return false
 	}
-	return wc.client.nowUTC().UnixNano() > data.LeaseExpiry
+	return time.Now().UTC().UnixNano() > data.LeaseExpiry
 }
 
 func (wc *workspaceClient) clearLock(ctx context.Context, desc ocispec.Descriptor) error {
@@ -761,70 +737,80 @@ func (wc *workspaceClient) retagToUnlocked(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-if err := retry(ctx, func(ctx context.Context) error {
-		return wc.client.repoClient.inner.Tag(ctx, desc, wc.unlockedTag)
-	}); err != nil {
+		if err := retry(ctx, func(ctx context.Context) error {
+			return wc.client.repoClient.inner.Tag(ctx, desc, wc.unlockedTag)
+		}); err != nil {
+			return err
+		}
+	} else if err != nil {
 		return err
 	}
-} else if err != nil {
-	return err
-}
-return retry(ctx, func(ctx context.Context) error {
-	return wc.client.repoClient.inner.Tag(ctx, desc, wc.lockTag)
-})
-}
-
-func (wc *workspaceClient) getLockInfo(ctx context.Context) (*LockInfo, error) {
-	fm, err := wc.fetchManifestWithDesc(ctx, wc.lockTag)
-	if err != nil {
-		return nil, err
-	}
-	return parseLockInfo(fm.m, wc.stateTag)
-}
-
-func (wc *workspaceClient) getLockManifestData(ctx context.Context) (*LockManifestData, error) {
-	fm, err := wc.fetchManifestWithDesc(ctx, wc.lockTag)
-	if err != nil {
-		return nil, err
-	}
-	return parseLockManifestData(fm.m)
-}
-
-func (wc *workspaceClient) fetchManifestWithDesc(ctx context.Context, reference string) (fetchedManifest, error) {
-	return retryWithResult(ctx, func(ctx context.Context) (fetchedManifest, error) {
-		return wc.fetchManifestInternal(ctx, reference)
+	return retry(ctx, func(ctx context.Context) error {
+		return wc.client.repoClient.inner.Tag(ctx, desc, wc.lockTag)
 	})
 }
 
-func (wc *workspaceClient) fetchManifestInternal(ctx context.Context, reference string) (fetchedManifest, error) {
+func (wc *workspaceClient) getLockInfo(ctx context.Context) (*LockInfo, error) {
+	fm, _, err := wc.fetchManifestWithDesc(ctx, wc.lockTag)
+	if err != nil {
+		return nil, err
+	}
+	return parseLockInfo(&fm, wc.stateTag)
+}
+
+func (wc *workspaceClient) getLockManifestData(ctx context.Context) (*LockManifestData, error) {
+	fm, _, err := wc.fetchManifestWithDesc(ctx, wc.lockTag)
+	if err != nil {
+		return nil, err
+	}
+	return parseLockManifestData(&fm)
+}
+
+func (wc *workspaceClient) fetchManifestWithDesc(ctx context.Context, reference string) (ocispec.Manifest, ocispec.Descriptor, error) {
+	var (
+		m    ocispec.Manifest
+		desc ocispec.Descriptor
+	)
+	err := retry(ctx, func(ctx context.Context) error {
+		var fetchErr error
+		m, desc, fetchErr = wc.fetchManifestInternal(ctx, reference)
+		return fetchErr
+	})
+	if err != nil {
+		return ocispec.Manifest{}, ocispec.Descriptor{}, err
+	}
+	return m, desc, nil
+}
+
+func (wc *workspaceClient) fetchManifestInternal(ctx context.Context, reference string) (ocispec.Manifest, ocispec.Descriptor, error) {
 	desc, err := wc.client.repoClient.inner.Resolve(ctx, reference)
 	if err != nil {
-		return fetchedManifest{}, err
+		return ocispec.Manifest{}, ocispec.Descriptor{}, err
 	}
 	rc, err := wc.client.repoClient.inner.Fetch(ctx, desc)
 	if err != nil {
-		return fetchedManifest{}, err
+		return ocispec.Manifest{}, ocispec.Descriptor{}, err
 	}
 	defer func() { _ = rc.Close() }()
 
 	data, err := io.ReadAll(rc)
 	if err != nil {
-		return fetchedManifest{}, err
+		return ocispec.Manifest{}, ocispec.Descriptor{}, err
 	}
 
-	var m manifest
+	var m ocispec.Manifest
 	if err := json.Unmarshal(data, &m); err != nil {
-		return fetchedManifest{}, fmt.Errorf("decoding manifest %q: %w", reference, err)
+		return ocispec.Manifest{}, ocispec.Descriptor{}, fmt.Errorf("decoding manifest %q: %w", reference, err)
 	}
 	if m.Annotations == nil {
 		m.Annotations = map[string]string{}
 	}
-	return fetchedManifest{m: &m, desc: desc}, nil
+	return m, desc, nil
 }
 
 // ─── Package-level helpers ────────────────────────────────────────────────────
 
-func parseLockInfo(m *manifest, stateTag string) (*LockInfo, error) {
+func parseLockInfo(m *ocispec.Manifest, stateTag string) (*LockInfo, error) {
 	if m.ArtifactType != "" && m.ArtifactType != artifactTypeLock {
 		return nil, fmt.Errorf("unexpected lock manifest artifactType %q", m.ArtifactType)
 	}
@@ -851,7 +837,7 @@ func parseLockInfo(m *manifest, stateTag string) (*LockInfo, error) {
 	return &LockInfo{ID: id, Path: stateTag}, nil
 }
 
-func parseLockManifestData(m *manifest) (*LockManifestData, error) {
+func parseLockManifestData(m *ocispec.Manifest) (*LockManifestData, error) {
 	if m.ArtifactType != "" && m.ArtifactType != artifactTypeLock {
 		return nil, fmt.Errorf("unexpected lock manifest artifactType %q", m.ArtifactType)
 	}
@@ -880,8 +866,9 @@ func workspaceTagFor(workspace string) string {
 //
 // Pre:  ctx is non-nil; repo is non-nil with a valid inner repository.
 // Post: returns a sorted, deduplicated list of workspace names. Names that were
-//       originally hashed (ws-* tags) are resolved from their manifest
-//       annotation. Returns nil slice (not error) if no workspaces exist.
+//
+//	originally hashed (ws-* tags) are resolved from their manifest
+//	annotation. Returns nil slice (not error) if no workspaces exist.
 func listWorkspacesFromTags(ctx context.Context, repo *orasRepositoryClient) ([]string, error) {
 	var tags []string
 	if err := repo.inner.Tags(ctx, "", func(page []string) error {
@@ -910,17 +897,7 @@ func listWorkspacesFromTags(ctx context.Context, repo *orasRepositoryClient) ([]
 	}
 
 	sort.Strings(out)
-	if len(out) == 0 {
-		return out, nil
-	}
-
-	dedup := out[:1]
-	for i := 1; i < len(out); i++ {
-		if out[i] != out[i-1] {
-			dedup = append(dedup, out[i])
-		}
-	}
-	return dedup, nil
+	return slices.Compact(out), nil
 }
 
 func splitStateVersionTag(tag string) (base string, version int, ok bool) {
@@ -967,7 +944,7 @@ func workspaceNameFromTag(ctx context.Context, repo *orasRepositoryClient, state
 			return "", err
 		}
 
-		var m manifest
+		var m ocispec.Manifest
 		if err := json.Unmarshal(data, &m); err != nil {
 			return "", fmt.Errorf("decoding manifest for workspace tag %q: %w", stateTag, err)
 		}
@@ -982,7 +959,8 @@ func workspaceNameFromTag(ctx context.Context, repo *orasRepositoryClient, state
 //
 // Pre:  data may be nil or empty (both produce valid gzip output).
 // Post: len(result) > 0; gzip.NewReader(bytes.NewReader(result)) succeeds and
-//       decompressing result reproduces data exactly.
+//
+//	decompressing result reproduces data exactly.
 func compressGzip(data []byte) ([]byte, error) {
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
@@ -1001,27 +979,10 @@ func compressGzip(data []byte) ([]byte, error) {
 // Retry runs operation up to 3 times with exponential backoff (1s, 2s, 4s),
 // retrying only on transient errors.
 func retry(ctx context.Context, operation func(context.Context) error) error {
-	var lastErr error
-	for attempt := 1; attempt <= 3; attempt++ {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		lastErr = operation(ctx)
-		if lastErr == nil {
-			return nil
-		}
-		if ctx.Err() != nil || !isTransientError(lastErr) {
-			return lastErr
-		}
-		if attempt < 3 {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(time.Duration(attempt) * time.Second):
-			}
-		}
-	}
-	return lastErr
+	_, err := retryWithResult(ctx, func(ctx context.Context) (struct{}, error) {
+		return struct{}{}, operation(ctx)
+	})
+	return err
 }
 
 func retryWithResult[T any](ctx context.Context, operation func(context.Context) (T, error)) (T, error) {

@@ -147,8 +147,7 @@ func countZotVersionTags(t *testing.T, addr, repoPath, prefix string) int {
 func newZotClient(t *testing.T, addr, repoPath string, cfg Config) *Client {
 	t.Helper()
 	base := Config{
-		Insecure:    true,
-		Compression: "none",
+		Insecure: true,
 	}
 	// Merge provided config over base
 	if cfg.HTTPClient != nil {
@@ -164,9 +163,7 @@ func newZotClient(t *testing.T, addr, repoPath string, cfg Config) *Client {
 	if cfg.Token != "" {
 		base.Token = cfg.Token
 	}
-	if cfg.Compression != "" {
-		base.Compression = cfg.Compression
-	}
+	base.Compression = cfg.Compression
 	if cfg.LockTTL != 0 {
 		base.LockTTL = cfg.LockTTL
 	}
@@ -403,7 +400,7 @@ func TestZotIntegration_Compression(t *testing.T) {
 	startZot(t, port)
 	waitForZot(t, addr)
 
-	c := newZotClient(t, addr, "provider-test/compression", Config{Compression: "gzip"})
+	c := newZotClient(t, addr, "provider-test/compression", Config{Compression: true})
 
 	original := bytes.Repeat([]byte("hello-terraform-state"), 100)
 	if err := c.Put(ctx, "default", original); err != nil {

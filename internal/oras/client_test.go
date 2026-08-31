@@ -26,11 +26,8 @@ import (
 func newRemoteClient(repo *orasRepositoryClient, workspace string) *workspaceClient {
 	wsTag := workspaceTagFor(workspace)
 	client := &Client{
-		repoClient: repo,
-		config: Config{
-			Compression: "none",
-		},
-		now:          time.Now,
+		repoClient:   repo,
+		config:       Config{},
 		retentionSem: make(chan struct{}, 3),
 		retentionWg:  sync.WaitGroup{},
 	}
@@ -47,11 +44,8 @@ func newRemoteClient(repo *orasRepositoryClient, workspace string) *workspaceCli
 // newTestClient creates a *Client with the given repo injected for testing.
 func newTestClient(repo *orasRepositoryClient) *Client {
 	return &Client{
-		repoClient: repo,
-		config: Config{
-			Compression: "none",
-		},
-		now:          time.Now,
+		repoClient:   repo,
+		config:       Config{},
 		retentionSem: make(chan struct{}, 3),
 	}
 }
@@ -120,8 +114,8 @@ func (r *deleteUnsupportedRepo) Delete(ctx context.Context, target ocispec.Descr
 // is set, so that post-write verification detects a different holder.
 type raceSimulatingRepo struct {
 	delegatingRepo
-	mu       sync.Mutex
-	raceTag  string
+	mu        sync.Mutex
+	raceTag   string
 	triggered bool
 	// pre-built rival manifest descriptor
 	rivalDesc ocispec.Descriptor
@@ -170,11 +164,11 @@ func newRivalLockManifest(ctx context.Context, t *testing.T, repo *fakeORASRepo,
 	}
 
 	// Build a minimal OCI image manifest as a byte payload.
-	m := manifest{
-		MediaType:   ocispec.MediaTypeImageManifest,
+	m := ocispec.Manifest{
+		MediaType:    ocispec.MediaTypeImageManifest,
 		ArtifactType: artifactTypeLock,
-		Annotations: annotations,
-		Layers:      []ocispec.Descriptor{},
+		Annotations:  annotations,
+		Layers:       []ocispec.Descriptor{},
 	}
 	raw, err := json.Marshal(m)
 	if err != nil {
@@ -194,11 +188,11 @@ func newRivalLockManifest(ctx context.Context, t *testing.T, repo *fakeORASRepo,
 // but a different holderID.
 type sameGenRaceRepo struct {
 	delegatingRepo
-	mu          sync.Mutex
-	raceTag     string
-	triggered   bool
-	rivalDesc   ocispec.Descriptor
-	rivalData   []byte
+	mu        sync.Mutex
+	raceTag   string
+	triggered bool
+	rivalDesc ocispec.Descriptor
+	rivalData []byte
 }
 
 func (r *sameGenRaceRepo) Tag(ctx context.Context, desc ocispec.Descriptor, reference string) error {
@@ -413,10 +407,10 @@ func TestWorkspaceTagFor_HashesInvalidWorkspaceNames(t *testing.T) {
 		{"with_underscore", "with_underscore"},
 		{"with.dot", "with.dot"},
 		{"UPPERCASE", "UPPERCASE"},
-		{"a/b", ""},          // slash not allowed in tags
-		{"has:colon", ""},    // colon not allowed
-		{"has space", ""},    // space not allowed
-		{"has?query", ""},    // question mark not allowed
+		{"a/b", ""},                    // slash not allowed in tags
+		{"has:colon", ""},              // colon not allowed
+		{"has space", ""},              // space not allowed
+		{"has?query", ""},              // question mark not allowed
 		{strings.Repeat("x", 129), ""}, // too long
 	}
 	for _, tt := range tests {
@@ -577,10 +571,8 @@ func TestRemoteClient_Delete_WithVersioning(t *testing.T) {
 	client := &Client{
 		repoClient: repo,
 		config: Config{
-			Compression: "none",
 			MaxVersions: 2,
 		},
-		now:          time.Now,
 		retentionSem: make(chan struct{}, 3),
 	}
 	c := &workspaceClient{
@@ -630,10 +622,8 @@ func TestRemoteClient_Put_VersioningTagsAndRetention(t *testing.T) {
 	client := &Client{
 		repoClient: repo,
 		config: Config{
-			Compression: "none",
 			MaxVersions: 2,
 		},
-		now:          time.Now,
 		retentionSem: make(chan struct{}, 3),
 	}
 	c := &workspaceClient{
@@ -692,10 +682,8 @@ func TestRemoteClient_RetagToNewManifest_PreservesVersionAnnotation(t *testing.T
 	client := &Client{
 		repoClient: repo,
 		config: Config{
-			Compression: "none",
 			MaxVersions: 3,
 		},
-		now:          time.Now,
 		retentionSem: make(chan struct{}, 3),
 	}
 	c := &workspaceClient{
@@ -713,11 +701,11 @@ func TestRemoteClient_RetagToNewManifest_PreservesVersionAnnotation(t *testing.T
 	c.client.retentionWg.Wait()
 
 	// Fetch the current manifest to check its version annotation.
-	fm, err := c.fetchManifestWithDesc(ctx, c.stateTag)
+	fm, _, err := c.fetchManifestWithDesc(ctx, c.stateTag)
 	if err != nil {
 		t.Fatalf("fetchManifestWithDesc: %v", err)
 	}
-	originalVersion := fm.m.Annotations[annotationStateVersion]
+	originalVersion := fm.Annotations[annotationStateVersion]
 
 	// Retag to a new manifest (simulating retention detach).
 	if err := c.retagToNewManifest(ctx, []string{c.stateTag}); err != nil {
@@ -726,13 +714,13 @@ func TestRemoteClient_RetagToNewManifest_PreservesVersionAnnotation(t *testing.T
 	c.client.retentionWg.Wait()
 
 	// Re-fetch and verify the version annotation is preserved.
-	fm2, err := c.fetchManifestWithDesc(ctx, c.stateTag)
+	fm2, _, err := c.fetchManifestWithDesc(ctx, c.stateTag)
 	if err != nil {
 		t.Fatalf("fetchManifestWithDesc after retag: %v", err)
 	}
-	if fm2.m.Annotations[annotationStateVersion] != originalVersion {
+	if fm2.Annotations[annotationStateVersion] != originalVersion {
 		t.Errorf("version annotation after retag = %q, want %q",
-			fm2.m.Annotations[annotationStateVersion], originalVersion)
+			fm2.Annotations[annotationStateVersion], originalVersion)
 	}
 }
 
@@ -882,7 +870,7 @@ func TestRemoteClient_StateCompression_GzipRoundTrip(t *testing.T) {
 	fake := newFakeORASRepo()
 	repo := &orasRepositoryClient{inner: fake}
 	c := newRemoteClient(repo, "default")
-	c.client.config.Compression = "gzip"
+	c.client.config.Compression = true
 
 	original := []byte("some state data to compress and decompress")
 	if err := c.put(ctx, original); err != nil {
@@ -890,15 +878,15 @@ func TestRemoteClient_StateCompression_GzipRoundTrip(t *testing.T) {
 	}
 
 	// Verify the stored layer has gzip media type.
-	fm, err := c.fetchManifestWithDesc(ctx, c.stateTag)
+	fm, _, err := c.fetchManifestWithDesc(ctx, c.stateTag)
 	if err != nil {
 		t.Fatalf("fetchManifestWithDesc: %v", err)
 	}
-	if len(fm.m.Layers) == 0 {
+	if len(fm.Layers) == 0 {
 		t.Fatal("no layers in manifest")
 	}
-	if fm.m.Layers[0].MediaType != mediaTypeStateLayerGzip {
-		t.Errorf("layer media type = %q, want %q", fm.m.Layers[0].MediaType, mediaTypeStateLayerGzip)
+	if fm.Layers[0].MediaType != mediaTypeStateLayerGzip {
+		t.Errorf("layer media type = %q, want %q", fm.Layers[0].MediaType, mediaTypeStateLayerGzip)
 	}
 
 	// Get should decompress automatically.
@@ -918,7 +906,7 @@ func TestRemoteClient_StateCompression_AutoDetectOnRead(t *testing.T) {
 	fake := newFakeORASRepo()
 	repo := &orasRepositoryClient{inner: fake}
 	c := newRemoteClient(repo, "default")
-	c.client.config.Compression = "none"
+	c.client.config.Compression = false
 
 	original := []byte("data stored without compression")
 	if err := c.put(ctx, original); err != nil {
@@ -926,15 +914,15 @@ func TestRemoteClient_StateCompression_AutoDetectOnRead(t *testing.T) {
 	}
 
 	// Verify uncompressed media type.
-	fm, err := c.fetchManifestWithDesc(ctx, c.stateTag)
+	fm, _, err := c.fetchManifestWithDesc(ctx, c.stateTag)
 	if err != nil {
 		t.Fatalf("fetchManifestWithDesc: %v", err)
 	}
-	if len(fm.m.Layers) == 0 {
+	if len(fm.Layers) == 0 {
 		t.Fatal("no layers")
 	}
-	if fm.m.Layers[0].MediaType != mediaTypeStateLayer {
-		t.Errorf("layer media type = %q, want %q", fm.m.Layers[0].MediaType, mediaTypeStateLayer)
+	if fm.Layers[0].MediaType != mediaTypeStateLayer {
+		t.Errorf("layer media type = %q, want %q", fm.Layers[0].MediaType, mediaTypeStateLayer)
 	}
 
 	// Get should return original data.
@@ -952,7 +940,7 @@ func TestRemoteClient_StateCompression_GzipEmptyState(t *testing.T) {
 	fake := newFakeORASRepo()
 	repo := &orasRepositoryClient{inner: fake}
 	c := newRemoteClient(repo, "default")
-	c.client.config.Compression = "gzip"
+	c.client.config.Compression = true
 
 	if err := c.put(ctx, []byte{}); err != nil {
 		t.Fatalf("put empty with gzip: %v", err)
@@ -995,7 +983,7 @@ func TestRemoteClient_Get_RejectsOversizedGzipState(t *testing.T) {
 	fake := newFakeORASRepo()
 	repo := &orasRepositoryClient{inner: fake}
 	c := newRemoteClient(repo, "default")
-	c.client.config.Compression = "gzip"
+	c.client.config.Compression = true
 	c.client.config.MaxStateSize = 10
 
 	data := []byte("this state data is compressed but longer than ten bytes uncompressed")
@@ -1014,39 +1002,60 @@ func TestRemoteClient_Get_RejectsOversizedGzipState(t *testing.T) {
 
 // ─── Lock TTL / stale lock tests ──────────────────────────────────────────────
 
+// pushStaleLock pushes a lock manifest with an expired lease directly into the
+// repo and tags it, so TTL expiry can be tested without an injectable clock.
+func pushStaleLock(ctx context.Context, t *testing.T, repo orasRepository, lockTag string) {
+	t.Helper()
+	lockData := LockManifestData{
+		Generation:  1,
+		LeaseExpiry: time.Now().Add(-time.Minute).UnixNano(),
+		HolderID:    "stale-lock",
+	}
+	lockDataJSON, err := json.Marshal(lockData)
+	if err != nil {
+		t.Fatalf("marshal lock data: %v", err)
+	}
+	rivalInfo := &LockInfo{ID: "stale-lock", Operation: "apply", Info: "old lock", Who: "old-user", Version: "1.0", Created: time.Now()}
+	infoBytes, _ := json.Marshal(rivalInfo)
+
+	m := ocispec.Manifest{
+		MediaType:    ocispec.MediaTypeImageManifest,
+		ArtifactType: artifactTypeLock,
+		Annotations: map[string]string{
+			annotationLockID:   "stale-lock",
+			annotationLockInfo: string(infoBytes),
+			annotationLockGen:  string(lockDataJSON),
+		},
+		Layers: []ocispec.Descriptor{},
+	}
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal stale lock manifest: %v", err)
+	}
+	d := digest.FromBytes(raw)
+	desc := ocispec.Descriptor{
+		MediaType: ocispec.MediaTypeImageManifest,
+		Digest:    d,
+		Size:      int64(len(raw)),
+	}
+	if err := repo.Push(ctx, desc, bytes.NewReader(raw)); err != nil {
+		t.Fatalf("push stale lock: %v", err)
+	}
+	if err := repo.Tag(ctx, desc, lockTag); err != nil {
+		t.Fatalf("tag stale lock: %v", err)
+	}
+}
+
 func TestRemoteClient_LockTTL_ClearsStaleLock(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakeORASRepo()
 	repo := &orasRepositoryClient{inner: fake}
 
-	// Oversized past time so we can detect stale lock.
-	pastTime := time.Now().Add(-10 * time.Minute)
-	nowFunc := func() time.Time {
-		return pastTime
-	}
-
 	c := newRemoteClient(repo, "default")
 	c.client.config.LockTTL = 5 * time.Minute
-	c.client.now = nowFunc
 
-	info := &LockInfo{
-		ID:        "stale-lock",
-		Operation: "apply",
-		Info:      "old lock",
-		Who:       "old-user",
-		Version:   "1.0",
-		Created:   pastTime,
-	}
-
-	// Acquire lock at the past time.
-	lockID, err := c.lock(ctx, info)
-	if err != nil {
-		t.Fatalf("lock: %v", err)
-	}
-
-	// Fast forward past the TTL.
-	nowFuture := pastTime.Add(c.client.config.LockTTL + time.Second)
-	c.client.now = func() time.Time { return nowFuture }
+	// Push a lock whose lease expired a minute ago.
+	pushStaleLock(ctx, t, fake, c.lockTag)
 
 	// A new lock attempt should succeed (stale lock is cleared).
 	info2 := &LockInfo{
@@ -1055,7 +1064,7 @@ func TestRemoteClient_LockTTL_ClearsStaleLock(t *testing.T) {
 		Info:      "new lock",
 		Who:       "new-user",
 		Version:   "2.0",
-		Created:   nowFuture,
+		Created:   time.Now(),
 	}
 	lockID2, err := c.lock(ctx, info2)
 	if err != nil {
@@ -1064,7 +1073,6 @@ func TestRemoteClient_LockTTL_ClearsStaleLock(t *testing.T) {
 
 	// Clean up.
 	_ = c.unlock(ctx, lockID2)
-	_ = c.unlock(ctx, lockID)
 }
 
 func TestRemoteClient_LockTTL_ClearsStaleLock_DeleteUnsupportedFallback(t *testing.T) {
@@ -1073,28 +1081,11 @@ func TestRemoteClient_LockTTL_ClearsStaleLock_DeleteUnsupportedFallback(t *testi
 	unsupportedInner := &deleteUnsupportedRepo{delegatingRepo: delegatingRepo{inner: fake}}
 	repo := &orasRepositoryClient{inner: unsupportedInner, repository: "ghcr.io/test/repo"}
 
-	pastTime := time.Now().Add(-10 * time.Minute)
-	nowFunc := func() time.Time { return pastTime }
-
 	c := newRemoteClient(repo, "default")
 	c.client.config.LockTTL = 5 * time.Minute
-	c.client.now = nowFunc
 
-	info := &LockInfo{
-		ID:        "stale-lock",
-		Operation: "apply",
-		Info:      "old lock on delete-unsupported repo",
-		Who:       "old-user",
-		Version:   "1.0",
-		Created:   pastTime,
-	}
-	lockID, err := c.lock(ctx, info)
-	if err != nil {
-		t.Fatalf("lock: %v", err)
-	}
-
-	// Fast forward past TTL.
-	c.client.now = func() time.Time { return pastTime.Add(c.client.config.LockTTL + time.Second) }
+	// Push a lock whose lease expired a minute ago.
+	pushStaleLock(ctx, t, fake, c.lockTag)
 
 	info2 := &LockInfo{
 		ID:        "new-lock",
@@ -1102,7 +1093,7 @@ func TestRemoteClient_LockTTL_ClearsStaleLock_DeleteUnsupportedFallback(t *testi
 		Info:      "new lock after stale",
 		Who:       "new-user",
 		Version:   "2.0",
-		Created:   c.client.now(),
+		Created:   time.Now(),
 	}
 	lockID2, err := c.lock(ctx, info2)
 	if err != nil {
@@ -1110,7 +1101,6 @@ func TestRemoteClient_LockTTL_ClearsStaleLock_DeleteUnsupportedFallback(t *testi
 	}
 
 	_ = c.unlock(ctx, lockID2)
-	_ = c.unlock(ctx, lockID)
 }
 
 // ─── Lock race / generation detection tests ───────────────────────────────────
@@ -1240,15 +1230,14 @@ func TestStaleLockCleanupRaceCondition(t *testing.T) {
 	fake := newFakeORASRepo()
 	repo := &orasRepositoryClient{inner: fake}
 
-	pastTime := time.Now().Add(-10 * time.Minute)
 	c := newRemoteClient(repo, "default")
 	c.client.config.LockTTL = 5 * time.Minute
-	c.client.now = func() time.Time { return pastTime }
 
-	// Create a stale lock manually using packLockManifestWithGeneration.
-	staleInfo := &LockInfo{ID: "crashed-process", Operation: "apply", Created: pastTime}
+	// Create a stale lock manually using packLockManifestWithGeneration,
+	// with a lease that expired a minute ago.
+	staleInfo := &LockInfo{ID: "crashed-process", Operation: "apply", Created: time.Now()}
 	staleInfoBytes, _ := json.Marshal(staleInfo)
-	leaseExpiry := pastTime.Add(c.client.config.LockTTL).UnixNano()
+	leaseExpiry := time.Now().Add(-time.Minute).UnixNano()
 	manifestDesc, err := c.packLockManifestWithGeneration(ctx, staleInfo.ID, string(staleInfoBytes), 5, leaseExpiry, staleInfo.ID)
 	if err != nil {
 		t.Fatalf("packLockManifestWithGeneration: %v", err)
@@ -1257,11 +1246,8 @@ func TestStaleLockCleanupRaceCondition(t *testing.T) {
 		t.Fatalf("tag stale lock: %v", err)
 	}
 
-	// Fast-forward past TTL.
-	c.client.now = func() time.Time { return pastTime.Add(c.client.config.LockTTL + time.Second) }
-
 	// A new lock should succeed (it detects and clears the stale lock).
-	info := &LockInfo{ID: "new-process", Operation: "apply", Who: "new-user", Version: "2.0", Created: c.client.now()}
+	info := &LockInfo{ID: "new-process", Operation: "apply", Who: "new-user", Version: "2.0", Created: time.Now()}
 	lockID, err := c.lock(ctx, info)
 	if err != nil {
 		t.Fatalf("expected lock to succeed after stale lock cleanup, got: %v", err)
@@ -1298,11 +1284,11 @@ func TestRemoteClient_UnlockFallbackWhenDeleteUnsupported(t *testing.T) {
 	}
 
 	// Verify the lock tag now points to an unlocked manifest.
-	fm, err := c.fetchManifestWithDesc(ctx, c.lockTag)
+	fm, _, err := c.fetchManifestWithDesc(ctx, c.lockTag)
 	if err != nil {
 		t.Fatalf("fetch lock tag after unlock: %v", err)
 	}
-	parsedInfo, _ := parseLockInfo(fm.m, c.stateTag)
+	parsedInfo, _ := parseLockInfo(&fm, c.stateTag)
 	if parsedInfo != nil && parsedInfo.ID != "" {
 		t.Errorf("expected lock tag to point to unlocked manifest after fallback unlock, got ID=%q", parsedInfo.ID)
 	}
@@ -1415,11 +1401,11 @@ func TestGroupVersionsByDigest_parallelResolution(t *testing.T) {
 
 	versions := []int{1, 2, 3, 4, 5}
 	// Resolve current state to get its digest.
-	fm, err := c.fetchManifestWithDesc(ctx, c.stateTag)
+	_, fmDesc, err := c.fetchManifestWithDesc(ctx, c.stateTag)
 	if err != nil {
 		t.Fatalf("fetchManifestWithDesc: %v", err)
 	}
-	currentDigest := fm.desc.Digest
+	currentDigest := fmDesc.Digest.String()
 
 	groups, err := c.groupVersionsByDigest(ctx, versions, currentDigest)
 	if err != nil {
@@ -1433,7 +1419,7 @@ func TestGroupVersionsByDigest_parallelResolution(t *testing.T) {
 
 	// The current digest should not appear in any group.
 	for key, group := range groups {
-		if key == currentDigest.String() {
+		if key == currentDigest {
 			t.Errorf("current digest %s should not appear in groups", key)
 		}
 		for _, tag := range group.tags {
@@ -1458,11 +1444,11 @@ func TestGroupVersionsByDigest_skipsCurrentDigest(t *testing.T) {
 	}
 	c.client.retentionWg.Wait()
 
-	fm, err := c.fetchManifestWithDesc(ctx, c.stateTag)
+	_, fmDesc, err := c.fetchManifestWithDesc(ctx, c.stateTag)
 	if err != nil {
 		t.Fatalf("fetchManifestWithDesc: %v", err)
 	}
-	currentDigest := fm.desc.Digest
+	currentDigest := fmDesc.Digest.String()
 
 	// The current state is the latest. Version 1 and 2 are older versions.
 	// After retention with max=3, all 3 versions should still exist.
@@ -1474,7 +1460,7 @@ func TestGroupVersionsByDigest_skipsCurrentDigest(t *testing.T) {
 
 	// Current digest should not be in any group.
 	for key := range groups {
-		if key == currentDigest.String() {
+		if key == currentDigest {
 			t.Errorf("current digest %s should not be in groups", key)
 		}
 	}

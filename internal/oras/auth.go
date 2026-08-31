@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vmvarela/terraform-provider-oras/internal/httputil"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/vmvarela/terraform-provider-oras/internal/httputil"
 	orasRemote "oras.land/oras-go/v2/registry/remote"
 	orasAuth "oras.land/oras-go/v2/registry/remote/auth"
 )
@@ -32,7 +32,7 @@ type Config struct {
 	Username     string
 	Password     string
 	Token        string
-	Compression  string // "none" or "gzip"
+	Compression  bool // gzip when true
 	LockTTL      time.Duration
 	MaxVersions  int
 	MaxStateSize int64
@@ -44,17 +44,8 @@ type Config struct {
 type Client struct {
 	repoClient   *orasRepositoryClient
 	config       Config
-	now          func() time.Time // injectable for testing
 	retentionSem chan struct{}
 	retentionWg  sync.WaitGroup
-}
-
-// nowUTC returns the current UTC time, using the injectable now func.
-func (c *Client) nowUTC() time.Time {
-	if c.now != nil {
-		return c.now().UTC()
-	}
-	return time.Now().UTC()
 }
 
 // orasRepository is the minimal interface for OCI repository operations
@@ -71,9 +62,9 @@ type orasRepository interface {
 // orasRepositoryClient wraps the ORAS repository client with additional
 // configuration for the state backend.
 type orasRepositoryClient struct {
-	repository   string             // full reference: registry/repository
+	repository   string // full reference: registry/repository
 	inner        orasRepository
-	token        string             // access token (for GHCR API calls)
+	token        string              // access token (for GHCR API calls)
 	resolvedCred orasAuth.Credential // resolved credential, whatever path produced it
 	httpClient   *http.Client
 }
@@ -96,19 +87,14 @@ func (r *orasRepositoryClient) accessToken(_ context.Context) (string, error) {
 // The registry parameter is the registry host (e.g. "ghcr.io" or "registry.example.com:5000").
 // The repository parameter is the repository name (e.g. "myorg/infra-state").
 func NewClient(registry, repository string, cfg Config) (*Client, error) {
-	fullRef := registry + "/" + repository
-
 	repoClient, err := newORASRepositoryClient(registry, repository, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create ORAS repository client: %w", err)
 	}
 
-	repoClient.repository = fullRef
-
 	return &Client{
 		repoClient:   repoClient,
 		config:       cfg,
-		now:          time.Now,
 		retentionSem: make(chan struct{}, 3),
 	}, nil
 }
@@ -188,9 +174,11 @@ func newORASRepositoryClient(registry, repository string, cfg Config) (*orasRepo
 //
 // Pre:  registry is a non-empty hostname string.
 // Post: returns a non-nil CredentialFunc; the returned token is non-empty only
-//       when an access token was resolved (cases 1, 3, 4a, 4b above); the
-//       returned Credential is the underlying credential regardless of which
-//       path resolved it (EmptyCredential for anonymous).
+//
+//	when an access token was resolved (cases 1, 3, 4a, 4b above); the
+//	returned Credential is the underlying credential regardless of which
+//	path resolved it (EmptyCredential for anonymous).
+//
 // tokenCredential converts a bearer-style token into a credential the
 // registry can actually authenticate. GHCR rejects tokens sent raw as
 // Bearer — oras-go skips the exchange when AccessToken is set — and
