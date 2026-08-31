@@ -11,8 +11,15 @@ terraform-provider-oras
 *.test
 *.out
 
-# Deepwork
-.slim/deepwork/
+# GoReleaser
+dist/
 
 # direnv
 .envrc
+
+# Agent tooling
+.agents/
+.claude/
+.opencode/
+.slim/
+skills-lock.json

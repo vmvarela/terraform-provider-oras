@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -16,8 +17,14 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
 	"github.com/vmvarela/terraform-provider-oras/internal/oras"
-	"github.com/vmvarela/terraform-provider-oras/internal/providerdata"
 )
+
+// ProviderData holds provider-level configuration forwarded to state stores
+// via ConfigureResponse.StateStoreData.
+type ProviderData struct {
+	Insecure   bool
+	HTTPClient *http.Client
+}
 
 // Compile-time interface checks.
 var (
@@ -108,18 +115,11 @@ func (s *OCIStateStore) Initialize(ctx context.Context, req fwss.InitializeReque
 	var orasCfg oras.Config
 
 	// Forward provider-level TLS settings to the ORAS client.
-	if pd, ok := req.ProviderData.(*providerdata.ProviderData); ok && pd != nil {
-		if pd.HTTPClient != nil {
-			orasCfg.HTTPClient = pd.HTTPClient
-		}
+	if pd, ok := req.ProviderData.(*ProviderData); ok && pd != nil {
+		orasCfg.HTTPClient = pd.HTTPClient
 		// Insecure sets repo.PlainHTTP, required for http:// registries
 		// (e.g. local Zot). Must be passed even when a custom HTTPClient exists.
-		if pd.Insecure {
-			orasCfg.Insecure = true
-		}
-		if pd.CAFile != "" {
-			orasCfg.CAFile = pd.CAFile
-		}
+		orasCfg.Insecure = pd.Insecure
 	}
 
 	if !cfg.Compression.IsNull() && !cfg.Compression.IsUnknown() {

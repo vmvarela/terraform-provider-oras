@@ -37,19 +37,14 @@ main.go → providerserver.Serve → internal/provider/ (OrasProvider)
                                      ├─ ProviderWithStateStores returns OCIStateStore factory
                                      └─ ProviderData flows to Initialize → Configure chain
                                               ↓
-internal/statestore/oci.go → wraps internal/oras/ client
-internal/oras/             → ORAS push/pull/lock/delete via oras-go v2
-internal/config/           → ProviderData shared type
+internal/statestore/oci.go → ProviderData + wraps internal/oras/ client
+internal/oras/             → ORAS push/pull/lock/delete via oras-go v2, auth, GHCR fallback
 ```
 
 - OCI tag scheme: `state-<workspace>`, `stver-<workspace>-v<N>`, `locked-<workspace>`, `unlocked-<workspace>` (GHCR fallback)
 - Lock uses generation-based optimistic concurrency; stale locks auto-cleared via TTL
 - Async retention goroutines (semaphore-limited, sem=3) prune old versions on Put
 - `Client.WaitForRetention()` blocks until all async retention completes — call before assertions in tests
-
-## Skills loaded
-
-`golang-pro`, `methodical-programming`, `pragmatic-docs` (from `.agents/skills/`, pinned via `skills-lock.json`)
 
 ## Release / CI
 

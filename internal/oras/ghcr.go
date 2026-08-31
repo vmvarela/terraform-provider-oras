@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -134,8 +135,8 @@ func listGitHubPackageVersions(ctx context.Context, client *http.Client, baseURL
 		return nil, err
 	}
 	query := versionsURL.Query()
-	query.Set("per_page", fmt.Sprintf("%d", githubVersionsPerPage))
-	query.Set("page", fmt.Sprintf("%d", page))
+	query.Set("per_page", strconv.Itoa(githubVersionsPerPage))
+	query.Set("page", strconv.Itoa(page))
 	versionsURL.RawQuery = query.Encode()
 
 	var versions []githubPackageVersion

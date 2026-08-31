@@ -16,8 +16,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/vmvarela/terraform-provider-oras/internal/httputil"
 )
 
 // headerCapturingRoundTripper captures the request and returns a 200 response.
@@ -142,7 +140,7 @@ func TestUserAgentRoundTripper_SetsUserAgent(t *testing.T) {
 
 func TestBuildHTTPClient(t *testing.T) {
 	t.Run("default client", func(t *testing.T) {
-		client, err := httputil.BuildHTTPClient(false, "")
+		client, err := BuildHTTPClient(false, "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -152,7 +150,7 @@ func TestBuildHTTPClient(t *testing.T) {
 	})
 
 	t.Run("insecure client", func(t *testing.T) {
-		client, err := httputil.BuildHTTPClient(true, "")
+		client, err := BuildHTTPClient(true, "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -177,7 +175,7 @@ func TestBuildHTTPClient(t *testing.T) {
 		caCert := generateCACert(t)
 		caFile := writeTempFile(t, caCert)
 
-		client, err := httputil.BuildHTTPClient(false, caFile)
+		client, err := BuildHTTPClient(false, caFile)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -187,7 +185,7 @@ func TestBuildHTTPClient(t *testing.T) {
 	})
 
 	t.Run("with non-existent CA file", func(t *testing.T) {
-		_, err := httputil.BuildHTTPClient(false, "/nonexistent/ca.pem")
+		_, err := BuildHTTPClient(false, "/nonexistent/ca.pem")
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
@@ -199,7 +197,7 @@ func TestBuildHTTPClient(t *testing.T) {
 	t.Run("with invalid PEM in CA file", func(t *testing.T) {
 		caFile := writeTempFile(t, []byte("not a valid PEM certificate"))
 
-		_, err := httputil.BuildHTTPClient(false, caFile)
+		_, err := BuildHTTPClient(false, caFile)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
@@ -210,12 +208,12 @@ func TestBuildHTTPClient(t *testing.T) {
 }
 
 func TestHTTPClientWithUserAgent(t *testing.T) {
-	// Test the full chain: httputil.BuildHTTPClient + userAgentRoundTripper
+	// Test the full chain: BuildHTTPClient + userAgentRoundTripper
 	origVersion := Version
 	Version = "1.0"
 	t.Cleanup(func() { Version = origVersion })
 
-	baseClient, err := httputil.BuildHTTPClient(false, "")
+	baseClient, err := BuildHTTPClient(false, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

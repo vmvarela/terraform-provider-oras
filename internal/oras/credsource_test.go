@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
 	"time"
 
@@ -20,7 +21,7 @@ func clearCredEnv(t *testing.T) {
 	for _, key := range []string{
 		"ORAS_TOKEN", "GHCR_TOKEN", "GITHUB_TOKEN",
 		"TF_CLI_CONFIG_FILE", "TERRAFORM_CONFIG",
-		"XDG_RUNTIME_DIR", "XDG_CONFIG_HOME",
+		"XDG_CONFIG_HOME",
 	} {
 		t.Setenv(key, "")
 	}
@@ -99,10 +100,10 @@ func TestConfigKeyMatch(t *testing.T) {
 
 func TestDecodeDockerAuth(t *testing.T) {
 	tests := []struct {
-		name      string
-		auth      string
-		wantOK    bool
-		wantCred  orasAuth.Credential
+		name     string
+		auth     string
+		wantOK   bool
+		wantCred orasAuth.Credential
 	}{
 		{
 			name:     "password containing colon",
@@ -111,9 +112,9 @@ func TestDecodeDockerAuth(t *testing.T) {
 			wantCred: orasAuth.Credential{Username: "user", Password: "pass:word"},
 		},
 		{
-			name:    "no colon",
-			auth:    base64.StdEncoding.EncodeToString([]byte("justauser")),
-			wantOK:  false,
+			name:   "no colon",
+			auth:   base64.StdEncoding.EncodeToString([]byte("justauser")),
+			wantOK: false,
 		},
 		{
 			name:   "empty auth",
@@ -142,24 +143,11 @@ func TestDecodeDockerAuth(t *testing.T) {
 func TestResolveConfiguredCredential_DockerConfig(t *testing.T) {
 	clearCredEnv(t)
 
-	t.Run("auths entry matched via XDG_RUNTIME_DIR", func(t *testing.T) {
-		dir := t.TempDir()
-		t.Setenv("XDG_RUNTIME_DIR", dir)
-		writeTestFile(t, dir, "containers/auth.json", `{
-			"auths": {"ghcr.io": {"auth": "` + base64.StdEncoding.EncodeToString([]byte("u1:p1")) + `"}}
-		}`)
-
-		cred, ok := resolveConfiguredCredential(context.Background(), "ghcr.io", "org/app")
-		if !ok || cred.Username != "u1" || cred.Password != "p1" {
-			t.Errorf("got ok=%v cred=%+v", ok, cred)
-		}
-	})
-
 	t.Run("auths entry via XDG_CONFIG_HOME", func(t *testing.T) {
 		dir := t.TempDir()
 		t.Setenv("XDG_CONFIG_HOME", dir)
 		writeTestFile(t, dir, "containers/auth.json", `{
-			"auths": {"ghcr.io/org": {"auth": "` + base64.StdEncoding.EncodeToString([]byte("u2:p2")) + `"}}
+			"auths": {"ghcr.io/org": {"auth": "`+base64.StdEncoding.EncodeToString([]byte("u2:p2"))+`"}}
 		}`)
 
 		cred, ok := resolveConfiguredCredential(context.Background(), "ghcr.io", "org/app")
@@ -216,21 +204,21 @@ func TestResolveConfiguredCredential_DockerConfig(t *testing.T) {
 		}
 	})
 
-	t.Run("search order: XDG_RUNTIME_DIR wins over HOME docker config", func(t *testing.T) {
+	t.Run("search order: containers/auth.json wins over HOME docker config", func(t *testing.T) {
 		dir := t.TempDir()
 		home := t.TempDir()
-		t.Setenv("XDG_RUNTIME_DIR", dir)
+		t.Setenv("XDG_CONFIG_HOME", dir)
 		t.Setenv("HOME", home)
 		writeTestFile(t, dir, "containers/auth.json", `{
-			"auths": {"ghcr.io": {"auth": "` + base64.StdEncoding.EncodeToString([]byte("runtime:rt")) + `"}}
+			"auths": {"ghcr.io": {"auth": "`+base64.StdEncoding.EncodeToString([]byte("containers:ct"))+`"}}
 		}`)
 		writeTestFile(t, home, ".docker/config.json", `{
-			"auths": {"ghcr.io": {"auth": "` + base64.StdEncoding.EncodeToString([]byte("docker:dc")) + `"}}
+			"auths": {"ghcr.io": {"auth": "`+base64.StdEncoding.EncodeToString([]byte("docker:dc"))+`"}}
 		}`)
 
 		cred, ok := resolveConfiguredCredential(context.Background(), "ghcr.io", "org/app")
-		if !ok || cred.Username != "runtime" {
-			t.Errorf("got ok=%v cred=%+v, want runtime (first source wins on tie)", ok, cred)
+		if !ok || cred.Username != "containers" {
+			t.Errorf("got ok=%v cred=%+v, want containers (first source wins on tie)", ok, cred)
 		}
 	})
 }
@@ -426,7 +414,7 @@ func TestResolveCredentialsPrecedence(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	writeTestFile(t, home, ".docker/config.json", `{
-		"auths": {"ghcr.io": {"auth": "` + base64.StdEncoding.EncodeToString([]byte("docker-user:docker-pass")) + `"}}
+		"auths": {"ghcr.io": {"auth": "`+base64.StdEncoding.EncodeToString([]byte("docker-user:docker-pass"))+`"}}
 	}`)
 
 	t.Run("token beats everything", func(t *testing.T) {
@@ -534,7 +522,7 @@ func TestAccessTokenFallbackFromResolvedCredential(t *testing.T) {
 		t.Setenv("HOME", dir)
 		t.Setenv("USERPROFILE", dir) // os.UserHomeDir() on Windows ignores HOME
 		writeTestFile(t, dir, ".docker/config.json", `{
-			"auths": {"ghcr.io": {"auth": "` + base64.StdEncoding.EncodeToString([]byte("docker-user:docker-token")) + `"}}
+			"auths": {"ghcr.io": {"auth": "`+base64.StdEncoding.EncodeToString([]byte("docker-user:docker-token"))+`"}}
 		}`)
 		_, token, cred := resolveCredentials("ghcr.io", "org/app", Config{})
 		if token != "" {
@@ -546,47 +534,40 @@ func TestAccessTokenFallbackFromResolvedCredential(t *testing.T) {
 	})
 }
 
-func TestDockerConfigPathsDedupe(t *testing.T) {
+func TestDockerConfigPaths(t *testing.T) {
 	clearCredEnv(t) // clears XDG_CONFIG_HOME, isolates HOME
 
-	t.Run("no duplicates when XDG_CONFIG_HOME unset", func(t *testing.T) {
-		paths := dockerConfigPaths()
-		seen := map[string]bool{}
-		for _, p := range paths {
-			if seen[p] {
-				t.Errorf("duplicate path %q", p)
-			}
-			seen[p] = true
-		}
-		// ~/.config/containers/auth.json and ~/.docker/config.json must both
-		// still be present exactly once.
+	t.Run("defaults to HOME", func(t *testing.T) {
 		home, _ := os.UserHomeDir()
-		for _, want := range []string{
+		want := []string{
 			filepath.Join(home, ".config", "containers", "auth.json"),
 			filepath.Join(home, ".docker", "config.json"),
-		} {
-			if !seen[want] {
-				t.Errorf("missing expected path %q in %v", want, paths)
-			}
+		}
+		if got := dockerConfigPaths(); !slices.Equal(got, want) {
+			t.Errorf("dockerConfigPaths() = %v, want %v", got, want)
 		}
 	})
 
-	t.Run("order preserved with XDG_CONFIG_HOME set", func(t *testing.T) {
+	t.Run("XDG_CONFIG_HOME relocates containers/auth.json", func(t *testing.T) {
 		xdg := t.TempDir()
 		t.Setenv("XDG_CONFIG_HOME", xdg)
-		paths := dockerConfigPaths()
 		want := filepath.Join(xdg, "containers", "auth.json")
-		found := false
-		for _, p := range paths {
-			if p == want {
-				found = true
-			}
-			if found && p != want {
-				break
-			}
+		if got := dockerConfigPaths(); len(got) == 0 || got[0] != want {
+			t.Errorf("dockerConfigPaths()[0] = %v, want %q", got, want)
 		}
-		if !found {
-			t.Errorf("XDG path %q missing from %v", want, paths)
+	})
+
+	t.Run("XDG_CONFIG_HOME survives an unknown home dir", func(t *testing.T) {
+		xdg := t.TempDir()
+		t.Setenv("XDG_CONFIG_HOME", xdg)
+		// os.UserHomeDir() fails when neither is set (HOME on Unix,
+		// USERPROFILE on Windows) — as in a container without HOME.
+		t.Setenv("HOME", "")
+		t.Setenv("USERPROFILE", "")
+
+		want := []string{filepath.Join(xdg, "containers", "auth.json")}
+		if got := dockerConfigPaths(); !slices.Equal(got, want) {
+			t.Errorf("dockerConfigPaths() = %v, want %v", got, want)
 		}
 	})
 }
