@@ -148,7 +148,7 @@ func (r *raceSimulatingRepo) Tag(ctx context.Context, desc ocispec.Descriptor, r
 // the given repo.
 func newRivalLockManifest(ctx context.Context, t *testing.T, repo *fakeORASRepo, holderID string, generation int64) (ocispec.Descriptor, []byte) {
 	t.Helper()
-	lockData := LockManifestData{
+	lockData := lockManifestData{
 		Generation:  generation,
 		LeaseExpiry: 0,
 		HolderID:    holderID,
@@ -340,6 +340,11 @@ func TestRemoteClient_LockContentionAndUnlockMismatch(t *testing.T) {
 	}
 	if lockErr.Info.ID != info.ID {
 		t.Errorf("LockError.Info.ID = %q, want %q", lockErr.Info.ID, info.ID)
+	}
+	// Regression: LockError.Unwrap exposes errStateLocked, so errors.Is must
+	// match the sentinel (it didn't before Unwrap was added).
+	if !errors.Is(err, errStateLocked) {
+		t.Errorf("errors.Is(err, errStateLocked) = false, err = %v", err)
 	}
 
 	// Unlock with wrong ID should fail.
@@ -960,17 +965,72 @@ func TestRemoteClient_StateCompression_GzipEmptyState(t *testing.T) {
 
 // ─── Oversized state tests ────────────────────────────────────────────────────
 
+func TestRemoteClient_Put_RejectsOversizedState(t *testing.T) {
+	// Write-side enforcement: Put must reject an oversized payload before
+	// pushing anything to the registry.
+	ctx := context.Background()
+	fake := newFakeORASRepo()
+	c := newRemoteClient(&orasRepositoryClient{inner: fake}, "default")
+	c.client.config.MaxStateSize = 10
+
+	err := c.put(ctx, []byte("this state is longer than ten bytes"))
+	if err == nil {
+		t.Fatal("expected error for oversized state, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds maximum allowed size") {
+		t.Errorf("error = %v, want 'exceeds maximum allowed size'", err)
+	}
+
+	// Nothing may have been written to the repo.
+	if len(fake.blobs) != 0 || len(fake.tags) != 0 {
+		t.Errorf("oversized put wrote to repo: %d blobs, %d tags", len(fake.blobs), len(fake.tags))
+	}
+}
+
+func TestRemoteClient_Put_PropagatesVersionLookupError(t *testing.T) {
+	// Regression: a fetch/list failure while determining the current version
+	// must fail Put instead of silently resetting the version to 1 and
+	// pushing anyway.
+	ctx := context.Background()
+	fake := newFakeORASRepo()
+	failRepo := &resolveFailingRepo{
+		delegatingRepo: delegatingRepo{inner: fake},
+		resolveErr:     errors.New("resolve boom"), // non-transient: no retry loop
+	}
+	c := newRemoteClient(&orasRepositoryClient{inner: failRepo}, "default")
+	c.client.config.MaxVersions = 2
+
+	err := c.put(ctx, []byte("state-data"))
+	if err == nil {
+		t.Fatal("expected put to fail when current version lookup fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed to determine current state version") {
+		t.Errorf("error = %v, want it to mention the version lookup failure", err)
+	}
+	// The old behavior silently pushed state as version 1; verify nothing
+	// was written.
+	if len(fake.tags) != 0 {
+		t.Errorf("put wrote tags despite version lookup failure: %v", fake.tags)
+	}
+}
+
 func TestRemoteClient_Get_RejectsOversizedState(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakeORASRepo()
 	repo := &orasRepositoryClient{inner: fake}
 	c := newRemoteClient(repo, "default")
-	c.client.config.MaxStateSize = 10
 
-	// Put state that is larger than the limit.
+	// Put enforces the limit too, so allow the payload through for the write,
+	// then tighten the limit before the read to exercise read-side enforcement.
+	const writeLimit = 100
+	const readLimit = 10
+	c.client.config.MaxStateSize = writeLimit
+
+	// Put state that is larger than the read-side limit.
 	if err := c.put(ctx, []byte("this state data is longer than ten bytes")); err != nil {
 		t.Fatalf("put: %v", err)
 	}
+	c.client.config.MaxStateSize = readLimit
 
 	_, err := c.get(ctx)
 	if err == nil {
@@ -987,12 +1047,19 @@ func TestRemoteClient_Get_RejectsOversizedGzipState(t *testing.T) {
 	repo := &orasRepositoryClient{inner: fake}
 	c := newRemoteClient(repo, "default")
 	c.client.config.Compression = true
-	c.client.config.MaxStateSize = 10
 
 	data := []byte("this state data is compressed but longer than ten bytes uncompressed")
+	// Put enforces the limit on the uncompressed size too, so allow the
+	// payload through for the write, then tighten the limit before the read
+	// to exercise read-side enforcement.
+	const writeLimit = 100
+	const readLimit = 10
+	c.client.config.MaxStateSize = writeLimit
+
 	if err := c.put(ctx, data); err != nil {
 		t.Fatalf("put: %v", err)
 	}
+	c.client.config.MaxStateSize = readLimit
 
 	_, err := c.get(ctx)
 	if err == nil {
@@ -1009,7 +1076,7 @@ func TestRemoteClient_Get_RejectsOversizedGzipState(t *testing.T) {
 // repo and tags it, so TTL expiry can be tested without an injectable clock.
 func pushStaleLock(ctx context.Context, t *testing.T, repo orasRepository, lockTag string) {
 	t.Helper()
-	lockData := LockManifestData{
+	lockData := lockManifestData{
 		Generation:  1,
 		LeaseExpiry: time.Now().Add(-time.Minute).UnixNano(),
 		HolderID:    "stale-lock",
@@ -1620,19 +1687,23 @@ func TestRetry_MaxAttemptsExhausted(t *testing.T) {
 
 func TestRetry_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	callCount := 0
+	firstCall := make(chan struct{})
 	errCh := make(chan error, 1)
 	go func() {
 		_, err := retryWithResult(ctx, func(ctx context.Context) (string, error) {
-			callCount++
+			select {
+			case firstCall <- struct{}{}:
+			case <-ctx.Done():
+			}
 			return "", &orasErrcode.ErrorResponse{StatusCode: http.StatusTooManyRequests}
 		})
 		errCh <- err
 	}()
 
-	// Cancel after a short delay.
-	time.Sleep(50 * time.Millisecond)
+	// Cancel as soon as the first attempt has started, rather than sleeping.
+	<-firstCall
 	cancel()
 
 	err := <-errCh
@@ -1641,6 +1712,30 @@ func TestRetry_ContextCancellation(t *testing.T) {
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestRetryWithResult_CancelDuringFailingAttempt(t *testing.T) {
+	// Regression: when the context is cancelled during a failing attempt, the
+	// returned error must satisfy errors.Is(err, context.Canceled) — the op
+	// error used to mask the cancellation entirely. The op error must still
+	// be inspectable via errors.Is/Unwrap.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	opErr := errors.New("op failed")
+	_, err := retryWithResult(ctx, func(ctx context.Context) (string, error) {
+		cancel() // cancelled during the failing attempt
+		return "", opErr
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("errors.Is(err, context.Canceled) = false, err = %v", err)
+	}
+	if !errors.Is(err, opErr) {
+		t.Errorf("op error must stay unwrappable, err = %v", err)
 	}
 }
 

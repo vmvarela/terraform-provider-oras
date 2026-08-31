@@ -1,6 +1,7 @@
 package oras
 
 import (
+	"errors"
 	"testing"
 )
 
@@ -121,7 +122,7 @@ func TestTryDeleteGHCRTag_NotGHCR(t *testing.T) {
 	if err == nil {
 		t.Error("tryDeleteGHCRTag expected error for non-GHCR repository")
 	}
-	if err != errNotGHCR {
+	if !errors.Is(err, errNotGHCR) {
 		t.Errorf("tryDeleteGHCRTag error = %v, want %v", err, errNotGHCR)
 	}
 }

@@ -90,10 +90,11 @@ func TestUserAgentRoundTripper_DoesNotMutateOriginalRequest(t *testing.T) {
 	}
 	originalReq.Header.Set("User-Agent", "original/1.0")
 
-	_, err = rt.RoundTrip(originalReq)
+	resp, err := rt.RoundTrip(originalReq)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
 
 	// Original request must be unchanged.
 	if got := originalReq.Header.Get("User-Agent"); got != "original/1.0" {
@@ -125,10 +126,11 @@ func TestUserAgentRoundTripper_SetsUserAgent(t *testing.T) {
 	}
 	req.Header.Set("User-Agent", "existing-agent/1.0")
 
-	_, err = rt.RoundTrip(req)
+	resp, err := rt.RoundTrip(req)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
 
 	if capturer.request == nil {
 		t.Fatal("inner round tripper was never called")
