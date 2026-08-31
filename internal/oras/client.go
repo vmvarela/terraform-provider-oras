@@ -53,6 +53,12 @@ const (
 // OCI layer (256 MiB).
 const defaultMaxStateSize int64 = 256 * 1024 * 1024
 
+// maxManifestSize bounds manifest reads from the registry. Manifests are tiny
+// JSON documents (1 MiB is generous); the cap prevents OOM on a corrupted or
+// malicious response.
+// ponytail: fixed 1 MiB cap; raise if OCI manifests ever legitimately exceed it.
+const maxManifestSize int64 = 1 << 20
+
 // Tag naming scheme:
 //   - State is stored at "state-<workspaceTag>".
 //   - State versions are stored at "stver-<workspaceTag>-v<N>".
@@ -109,10 +115,13 @@ func (e *LockError) Error() string {
 	return "state is locked"
 }
 
+// Unwrap exposes the underlying error so errors.Is(err, errStateLocked) works.
+func (e *LockError) Unwrap() error { return e.Err }
+
 // ─── Internal types ───────────────────────────────────────────────────────────
 
-// LockManifestData holds metadata stored in a lock manifest's annotations.
-type LockManifestData struct {
+// lockManifestData holds metadata stored in a lock manifest's annotations.
+type lockManifestData struct {
 	Generation  int64  `json:"generation"`
 	LeaseExpiry int64  `json:"lease_expiry,omitempty"`
 	HolderID    string `json:"holder_id,omitempty"`
@@ -158,6 +167,16 @@ func (c *Client) Get(ctx context.Context, stateID string) ([]byte, error) {
 	})
 }
 
+// maxStateSize returns the effective maximum state size, applying the default
+// when unset or non-positive. Shared by the read and write paths so both
+// enforce the same limit.
+func (c *Client) maxStateSize() int64 {
+	if c.config.MaxStateSize <= 0 {
+		return defaultMaxStateSize
+	}
+	return c.config.MaxStateSize
+}
+
 func (wc *workspaceClient) get(ctx context.Context) ([]byte, error) {
 	fm, _, err := wc.fetchManifestWithDesc(ctx, wc.stateTag)
 	if err != nil {
@@ -195,10 +214,7 @@ func (wc *workspaceClient) get(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("unsupported state layer media type %q", layer.MediaType)
 	}
 
-	limit := wc.client.config.MaxStateSize
-	if limit <= 0 {
-		limit = defaultMaxStateSize
-	}
+	limit := wc.client.maxStateSize()
 	lr := io.LimitReader(r, limit+1)
 	data, err := io.ReadAll(lr)
 	if err != nil {
@@ -220,6 +236,10 @@ func (c *Client) Put(ctx context.Context, stateID string, data []byte) error {
 }
 
 func (wc *workspaceClient) put(ctx context.Context, state []byte) error {
+	if limit := wc.client.maxStateSize(); int64(len(state)) > limit {
+		return fmt.Errorf("state size exceeds maximum allowed size of %d bytes; use the max_state_size option to increase the limit", limit)
+	}
+
 	stateToPush := state
 	layerMediaType := mediaTypeStateLayer
 
@@ -234,7 +254,11 @@ func (wc *workspaceClient) put(ctx context.Context, state []byte) error {
 
 	var nextVersion int
 	if wc.client.config.MaxVersions > 0 {
-		nextVersion = wc.currentStateVersion(ctx) + 1
+		current, err := wc.currentStateVersion(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to determine current state version: %w", err)
+		}
+		nextVersion = current + 1
 	}
 
 	layerDesc, err := oras.PushBytes(ctx, wc.client.repoClient.inner, layerMediaType, stateToPush)
@@ -266,9 +290,13 @@ func (wc *workspaceClient) put(ctx context.Context, state []byte) error {
 	// cancelled, ensuring version retention limits are enforced regardless
 	// of the calling operation's lifecycle.
 	sem := wc.client.retentionSem
+	// Register the goroutine with the WaitGroup before attempting the
+	// semaphore acquire: adding after the select leaves a window where
+	// WaitForRetention can observe a zero counter and return while a
+	// goroutine is about to be spawned.
+	wc.client.retentionWg.Add(1)
 	select {
 	case sem <- struct{}{}:
-		wc.client.retentionWg.Add(1)
 		go func() {
 			defer wc.client.retentionWg.Done()
 			defer func() { <-sem }()
@@ -294,6 +322,7 @@ func (wc *workspaceClient) put(ctx context.Context, state []byte) error {
 			}
 		}()
 	default:
+		wc.client.retentionWg.Done()
 		slog.Debug("async retention skipped: too many pending cleanups")
 	}
 
@@ -342,7 +371,7 @@ func (wc *workspaceClient) lock(ctx context.Context, info *LockInfo) (string, er
 		return "", fmt.Errorf("lock info is required")
 	}
 
-	var currentGen *LockManifestData
+	var currentGen *lockManifestData
 	lockM, lockDesc, err := wc.fetchManifestWithDesc(ctx, wc.lockTag)
 	if err != nil && !isNotFound(err) {
 		return "", fmt.Errorf("failed to read current lock state: %w", err)
@@ -400,8 +429,17 @@ func (wc *workspaceClient) lock(ctx context.Context, info *LockInfo) (string, er
 	// parsing can fail: content addressing guarantees our own digest fetches
 	// back our own bytes.
 	cleanupOurTag := func() {
-		if d, err := wc.client.repoClient.inner.Resolve(ctx, wc.lockTag); err == nil && d.Digest == manifestDesc.Digest {
-			_ = wc.client.repoClient.inner.Delete(ctx, d)
+		d, err := wc.client.repoClient.inner.Resolve(ctx, wc.lockTag)
+		if err != nil || d.Digest != manifestDesc.Digest {
+			return
+		}
+		if err := wc.client.repoClient.inner.Delete(ctx, d); err != nil && isDeleteUnsupported(err) {
+			// Registries like GHCR (HTTP 405) can't delete manifests;
+			// retag to "unlocked-" so the workspace isn't locked until
+			// TTL expiry.
+			if retagErr := wc.retagToUnlocked(ctx); retagErr != nil {
+				slog.Debug("failed to retag lock to unlocked after failed verification", "error", retagErr)
+			}
 		}
 	}
 
@@ -464,7 +502,9 @@ func (wc *workspaceClient) unlock(ctx context.Context, id string) error {
 
 // List returns all workspace names stored in the OCI repository.
 func (c *Client) List(ctx context.Context) ([]string, error) {
-	return listWorkspacesFromTags(ctx, c.repoClient)
+	return retryWithResult(ctx, func(ctx context.Context) ([]string, error) {
+		return listWorkspacesFromTags(ctx, c.repoClient)
+	})
 }
 
 // WaitForRetention blocks until all in-flight async retention goroutines complete.
@@ -492,7 +532,7 @@ func (wc *workspaceClient) packStateManifest(ctx context.Context, layers []ocisp
 // packLockManifest builds a lock manifest. holderID doubles as the lock ID
 // annotation — the two are always the same value.
 func (wc *workspaceClient) packLockManifest(ctx context.Context, infoJSON string, generation, leaseExpiry int64, holderID string) (ocispec.Descriptor, error) {
-	lockData := LockManifestData{
+	lockData := lockManifestData{
 		Generation:  generation,
 		LeaseExpiry: leaseExpiry,
 		HolderID:    holderID,
@@ -516,20 +556,27 @@ func (wc *workspaceClient) versionTagFor(version int) string {
 	return fmt.Sprintf("%s%s%d", wc.versionTagBase, stateVersionTagSeparator, version)
 }
 
-func (wc *workspaceClient) currentStateVersion(ctx context.Context) int {
+// currentStateVersion returns the highest known version number for the
+// workspace: from the state manifest annotation, falling back to the version
+// tags. A missing state manifest yields (0, nil); any other failure is
+// propagated so Put fails instead of silently resetting versioning to 1.
+func (wc *workspaceClient) currentStateVersion(ctx context.Context) (int, error) {
 	fm, _, err := wc.fetchManifestWithDesc(ctx, wc.stateTag)
 	if err != nil {
-		return 0
+		if isNotFound(err) {
+			return 0, nil
+		}
+		return 0, err
 	}
 	if v, ok := fm.Annotations[annotationStateVersion]; ok {
 		n, parseErr := strconv.Atoi(v)
 		if parseErr == nil && n > 0 {
-			return n
+			return n, nil
 		}
 	}
 	existing, listErr := wc.listExistingVersions(ctx)
-	if listErr != nil || len(existing) == 0 {
-		return 0
+	if listErr != nil {
+		return 0, listErr
 	}
 	max := 0
 	for _, v := range existing {
@@ -537,7 +584,7 @@ func (wc *workspaceClient) currentStateVersion(ctx context.Context) int {
 			max = v
 		}
 	}
-	return max
+	return max, nil
 }
 
 func (wc *workspaceClient) listExistingVersions(ctx context.Context) ([]int, error) {
@@ -716,7 +763,7 @@ func (wc *workspaceClient) deleteDigestWithFallback(ctx context.Context, desc oc
 	return nil
 }
 
-func (wc *workspaceClient) isLockStale(data *LockManifestData) bool {
+func (wc *workspaceClient) isLockStale(data *lockManifestData) bool {
 	if wc.client.config.LockTTL <= 0 {
 		return false
 	}
@@ -788,7 +835,7 @@ func (wc *workspaceClient) fetchManifestInternal(ctx context.Context, reference 
 	}
 	defer func() { _ = rc.Close() }()
 
-	data, err := io.ReadAll(rc)
+	data, err := io.ReadAll(io.LimitReader(rc, maxManifestSize))
 	if err != nil {
 		return ocispec.Manifest{}, ocispec.Descriptor{}, err
 	}
@@ -832,18 +879,18 @@ func parseLockInfo(m *ocispec.Manifest, stateTag string) (*LockInfo, error) {
 	return &LockInfo{ID: id, Path: stateTag}, nil
 }
 
-func parseLockManifestData(m *ocispec.Manifest) (*LockManifestData, error) {
+func parseLockManifestData(m *ocispec.Manifest) (*lockManifestData, error) {
 	if m.ArtifactType != "" && m.ArtifactType != artifactTypeLock {
 		return nil, fmt.Errorf("unexpected lock manifest artifactType %q", m.ArtifactType)
 	}
 	if raw, ok := m.Annotations[annotationLockGen]; ok && raw != "" {
-		var data LockManifestData
+		var data lockManifestData
 		if err := json.Unmarshal([]byte(raw), &data); err != nil {
 			return nil, fmt.Errorf("decoding lock generation data: %w", err)
 		}
 		return &data, nil
 	}
-	return &LockManifestData{Generation: 0}, nil
+	return &lockManifestData{Generation: 0}, nil
 }
 
 // workspaceTagFor converts a workspace name to a valid OCI tag, hashing if necessary.
@@ -934,7 +981,7 @@ func workspaceNameFromTag(ctx context.Context, repo *orasRepositoryClient, state
 		}
 		defer func() { _ = rc.Close() }()
 
-		data, err := io.ReadAll(rc)
+		data, err := io.ReadAll(io.LimitReader(rc, maxManifestSize))
 		if err != nil {
 			return "", err
 		}
@@ -992,7 +1039,13 @@ func retryWithResult[T any](ctx context.Context, operation func(context.Context)
 			return result, nil
 		}
 		lastErr = err
-		if ctx.Err() != nil || !isTransientError(err) {
+		if ctx.Err() != nil {
+			// The context was cancelled during the failed attempt: surface
+			// the cancellation (not the op error) so errors.Is matches,
+			// while keeping the op error inspectable via errors.As/Unwrap.
+			return zero, fmt.Errorf("%w: %w", ctx.Err(), err)
+		}
+		if !isTransientError(err) {
 			return zero, err
 		}
 		if attempt < 3 {
