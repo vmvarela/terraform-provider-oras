@@ -9,10 +9,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-test:
     name: Build & Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -32,9 +37,21 @@ jobs:
       - name: Unit tests
         run: go test -race -count=1 ./...
 
+      - name: Unit tests with coverage
+        if: matrix.os == 'ubuntu-latest'
+        run: go test -race -count=1 -coverprofile=coverage.out ./...
+
+      - name: Upload coverage profile
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-ubuntu
+          path: coverage.out
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -48,9 +65,25 @@ jobs:
         with:
           version: v2.12
 
+  govulncheck:
+    name: Vulnerability scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
   integration-test:
     name: Integration Test (Zot)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
@@ -69,6 +102,7 @@ jobs:
     # Skip fork PRs: their GITHUB_TOKEN is read-only and cannot push packages.
     if: github.event_name == 'push' || (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: write
@@ -89,6 +123,7 @@ jobs:
   terraform-integration:
     name: Terraform Integration (State Store)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
@@ -124,8 +159,8 @@ jobs:
       - name: Run Terraform init & apply
         env:
           TF_ENABLE_PLUGGABLE_STATE_STORAGE: "1"
+        working-directory: examples
         run: |
-          cd examples
           # Create terraform.rc to use local provider
           cat > terraform.rc <<EOF
           provider_installation {
@@ -135,9 +170,8 @@ jobs:
             direct {}
           }
           EOF
-          TF_CLI_CONFIG_FILE="terraform.rc" terraform init -upgrade
-          TF_CLI_CONFIG_FILE="terraform.rc" terraform apply -auto-approve -input=false
-        working-directory: ${{ github.workspace }}
+          TF_CLI_CONFIG_FILE="$PWD/terraform.rc" terraform init -upgrade
+          TF_CLI_CONFIG_FILE="$PWD/terraform.rc" terraform apply -auto-approve -input=false
 
       - name: Cleanup
         if: always()

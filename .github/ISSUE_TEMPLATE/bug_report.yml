@@ -1,0 +1,77 @@
+name: Bug report
+description: Report a problem with the provider
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug. Please fill in the details below.
+        For security issues, use [private vulnerability reporting](https://github.com/vmvarela/terraform-provider-oras/security/advisories/new) instead.
+  - type: input
+    id: provider-version
+    attributes:
+      label: Provider version
+      description: Output of `terraform providers` or the version constraint in your config.
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: terraform-version
+    attributes:
+      label: Terraform version
+      description: Output of `terraform version`.
+      placeholder: 1.17.0-alpha20260827
+    validations:
+      required: true
+  - type: dropdown
+    id: registry
+    attributes:
+      label: Registry
+      options:
+        - GHCR
+        - Docker Hub
+        - Zot
+        - Harbor
+        - Other
+    validations:
+      required: true
+  - type: checkboxes
+    id: env-flag
+    attributes:
+      label: Environment flag
+      description: The pluggable state storage feature flag must be set at runtime.
+      options:
+        - label: I have `TF_ENABLE_PLUGGABLE_STATE_STORAGE=1` set in the shell running Terraform
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproducer
+      description: Smallest HCL config that reproduces the issue.
+      render: hcl
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        Relevant Terraform output. Set `TF_LOG=DEBUG` for verbose logging if useful.
+        **Redact registry tokens (`ORAS_TOKEN` / `GHCR_TOKEN` / `GITHUB_TOKEN`) and any
+        state contents** — state routinely contains secrets.
+      render: shell
+    validations:
+      required: false
