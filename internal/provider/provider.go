@@ -47,6 +47,7 @@ type providerModel struct {
 // Metadata sets the provider type name used to prefix resource/state-store names.
 func (p *OrasProvider) Metadata(_ context.Context, _ provider.MetadataRequest, resp *provider.MetadataResponse) {
 	resp.TypeName = "oras"
+	resp.Version = oras.Version
 }
 
 // Schema declares provider-level configuration attributes.

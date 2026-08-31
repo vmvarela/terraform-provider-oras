@@ -127,9 +127,16 @@ func (s *OCIStateStore) Initialize(ctx context.Context, req fwss.InitializeReque
 	}
 
 	if !cfg.LockTTL.IsNull() && !cfg.LockTTL.IsUnknown() {
-		if ttl, err := time.ParseDuration(cfg.LockTTL.ValueString()); err == nil {
-			orasCfg.LockTTL = ttl
+		ttl, err := time.ParseDuration(cfg.LockTTL.ValueString())
+		if err != nil {
+			resp.Diagnostics.AddAttributeError(
+				path.Root("lock_ttl"),
+				"Invalid Lock TTL",
+				fmt.Sprintf("lock_ttl %q is not a valid duration; expected a Go duration string such as \"15m\" or \"1h\".", cfg.LockTTL.ValueString()),
+			)
+			return
 		}
+		orasCfg.LockTTL = ttl
 	}
 
 	if !cfg.MaxVersions.IsNull() && !cfg.MaxVersions.IsUnknown() {
@@ -276,7 +283,8 @@ func parseOCIURL(rawURL string) (registry, repository string, err error) {
 	if repository == "" {
 		return "", "", fmt.Errorf("OCI URL %q is missing the repository path", rawURL)
 	}
-	if strings.Contains(repository, "..") || strings.Contains(repository, "//") {
+	if strings.Contains(repository, "..") || strings.Contains(repository, "//") ||
+		strings.HasPrefix(repository, "/") || strings.HasSuffix(repository, "/") {
 		return "", "", fmt.Errorf("OCI URL %q contains invalid path component", rawURL)
 	}
 	return registry, repository, nil
