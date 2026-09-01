@@ -30,6 +30,9 @@ version-resolver:
       - 'type:docs'
       - 'dependencies'
   default: patch
+# Releases are prerelease-only (-alpha suffixes); without this, the resolver
+# ignores prereleases as "latest" and falls back to v0.0.1.
+include-pre-releases: true
 autolabeler:
   - label: 'type:feature'
     title:
