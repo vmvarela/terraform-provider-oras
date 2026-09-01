@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/vmvarela/terraform-provider-oras/actions/workflows/ci.yml/badge.svg)](https://github.com/vmvarela/terraform-provider-oras/actions/workflows/ci.yml)
 [![License: MPL-2.0](https://img.shields.io/badge/License-MPL--2.0-blue.svg)](https://opensource.org/licenses/MPL-2.0)
+![Status: experimental](https://img.shields.io/badge/status-experimental-orange)
+![Terraform: 1.17 alpha](https://img.shields.io/badge/terraform-1.17%20alpha-blue)
 
 Store Terraform state in any OCI-compatible registry — GHCR, Docker Hub, Zot, Harbor, or your
 own — using the ORAS protocol. If your team already runs an OCI registry, you can skip a
