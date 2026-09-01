@@ -16,7 +16,7 @@ Terraform 1.17 alpha builds (pinned in `.terraform-version`). Set
 ```hcl
 terraform {
   required_providers {
-    oras = { source = "registry.terraform.io/vmvarela/oras", version = "~> 0.1" }
+    oras = { source = "registry.terraform.io/vmvarela/oras", version = "0.1.5-alpha" }
   }
 
   state_store "oras_oci" {

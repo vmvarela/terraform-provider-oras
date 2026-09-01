@@ -16,6 +16,7 @@ No resources, no data sources. The provider exists solely to expose the `oras_oc
 
 - Terraform 1.17+ alpha (see `.terraform-version`)
 - `TF_ENABLE_PLUGGABLE_STATE_STORAGE=1`, or `terraform init -enable-pluggable-state-storage-experiment`
+- Pin the provider to the exact version (e.g. `version = "0.1.5-alpha"`): Terraform's range operators (`~>`, `>=`, …) never select pre-release versions
 
 ## Example Usage
 
@@ -24,7 +25,7 @@ terraform {
   required_providers {
     oras = {
       source  = "registry.terraform.io/vmvarela/oras"
-      version = "~> 0.1"
+      version = "0.1.5-alpha"
     }
   }
 
