@@ -59,6 +59,28 @@ func writeHelperScript(t *testing.T, name, script string) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
+func TestNormalizeRegistryHost(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"ghcr.io", "ghcr.io"},
+		{"GHCR.IO", "ghcr.io"},
+		{"https://ghcr.io", "ghcr.io"},
+		{"http://ghcr.io", "ghcr.io"},
+		{"https://index.docker.io/v1/", "index.docker.io"},
+		{"https://index.docker.io/v1", "index.docker.io"},
+		{"registry.example.com:5000", "registry.example.com:5000"},
+		{"http://Registry.Example.com:5000", "registry.example.com:5000"},
+		{"ghcr.io/", "ghcr.io"},
+		{"  ghcr.io  ", "ghcr.io"},
+	}
+	for _, tt := range tests {
+		if got := normalizeRegistryHost(tt.in); got != tt.want {
+			t.Errorf("normalizeRegistryHost(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
 func TestConfigKeyMatch(t *testing.T) {
 	tests := []struct {
 		name string
@@ -94,6 +116,33 @@ func TestConfigKeyMatch(t *testing.T) {
 	t.Run("domain key matches any path with lower specificity than path key", func(t *testing.T) {
 		if configKeyMatch("ghcr.io", "ghcr.io", "org/app") >= configKeyMatch("ghcr.io/org", "ghcr.io", "org/app") {
 			t.Error("path key should be more specific than domain key")
+		}
+	})
+
+	t.Run("docker hub legacy key matches", func(t *testing.T) {
+		if got := configKeyMatch("https://index.docker.io/v1/", "index.docker.io", "org/app"); got != 2 {
+			t.Errorf("docker hub legacy key = %d, want 2", got)
+		}
+		if got := configKeyMatch("https://index.docker.io/v1/", "index.docker.io", ""); got != 2 {
+			t.Errorf("docker hub legacy key vs empty path = %d, want 2", got)
+		}
+	})
+
+	t.Run("uppercase host key matches lowercase domain", func(t *testing.T) {
+		if got := configKeyMatch("GHCR.IO", "ghcr.io", "org/app"); got != 2 {
+			t.Errorf("uppercase key = %d, want 2", got)
+		}
+		if got := configKeyMatch("ghcr.io", "GHCR.IO", "org/app"); got != 2 {
+			t.Errorf("uppercase domain = %d, want 2", got)
+		}
+	})
+
+	t.Run("host with port matches exactly", func(t *testing.T) {
+		if got := configKeyMatch("registry.example.com:5000", "registry.example.com:5000", ""); got != 2 {
+			t.Errorf("port key = %d, want 2", got)
+		}
+		if got := configKeyMatch("registry.example.com:5000", "registry.example.com", ""); got != 0 {
+			t.Errorf("port key vs different port = %d, want 0", got)
 		}
 	})
 }
@@ -472,6 +521,27 @@ func TestResolveCredentialsPrecedence(t *testing.T) {
 		}
 		if got != orasAuth.EmptyCredential || cred != orasAuth.EmptyCredential {
 			t.Errorf("cred = %+v resolved = %+v, want EmptyCredential", cred, got)
+		}
+	})
+
+	t.Run("uppercase GHCR.IO uses GHCR_TOKEN", func(t *testing.T) {
+		clearCredEnv(t)
+		t.Setenv("HOME", t.TempDir()) // no docker config, no terraformrc
+		t.Setenv("TF_CLI_CONFIG_FILE", "")
+		t.Setenv("GHCR_TOKEN", "ghtok")
+		fn, token, _ := resolveCredentials("GHCR.IO", "org/app", Config{})
+		if token != "ghtok" {
+			t.Errorf("token = %q, want %q", token, "ghtok")
+		}
+		// GHCR tokens must be exchanged via basic auth, not sent as Bearer.
+		// The credential func is keyed by the normalized host — the host the
+		// HTTP client actually dials.
+		got, err := fn(context.Background(), "ghcr.io")
+		if err != nil {
+			t.Fatalf("credential func error: %v", err)
+		}
+		if got.Username == "" || got.Password != "ghtok" {
+			t.Errorf("cred = %+v, want basic auth with password ghtok", got)
 		}
 	})
 }

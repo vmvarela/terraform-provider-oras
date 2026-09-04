@@ -69,12 +69,21 @@ func fakeGitHubResponse(status int, body string) *http.Response {
 	}
 }
 
-// ghcrVersionsBody marshals versions (id -> tags) as the API's version list.
-func ghcrVersionsBody(versions map[int64][]string) string {
+// testDigest is a realistic manifest digest ("name" field) used in canned
+// GitHub Packages responses.
+var testDigest = "sha256:" + strings.Repeat("ab", 32)
+
+// otherDigest differs from testDigest, for digest-mismatch cases.
+var otherDigest = "sha256:" + strings.Repeat("cd", 32)
+
+// ghcrVersionsBody marshals versions (id -> tags) as the API's version list,
+// each carrying name as its top-level digest.
+func ghcrVersionsBody(versions map[int64][]string, name string) string {
 	out := make([]githubPackageVersion, 0, len(versions))
 	for id, tags := range versions {
 		var v githubPackageVersion
 		v.ID = id
+		v.Name = name
 		v.Metadata.Container.Tags = tags
 		out = append(out, v)
 	}
@@ -128,7 +137,7 @@ func TestDeleteGitHubPackageVersionByTag_Success(t *testing.T) {
 			if got := r.Query.Get("page"); got != "1" {
 				t.Errorf("page = %q, want 1", got)
 			}
-			fmt.Fprint(w, ghcrVersionsBody(map[int64][]string{42: {"state-default"}})) //nolint:errcheck // test response write
+			fmt.Fprint(w, ghcrVersionsBody(map[int64][]string{42: {"state-default"}}, testDigest)) //nolint:errcheck // test response write
 		case r.Method == http.MethodDelete && r.Path == "/orgs/myorg/packages/container/myrepo/versions/42":
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -136,7 +145,7 @@ func TestDeleteGitHubPackageVersionByTag_Success(t *testing.T) {
 		}
 	})
 
-	err := deleteGitHubPackageVersionByTag(ctx, srv.Client(), srv.URL, "myorg", "myrepo", "state-default", "tok-123")
+	err := deleteGitHubPackageVersionByTag(ctx, srv.Client(), srv.URL, "myorg", "myrepo", "state-default", "tok-123", testDigest)
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -161,13 +170,13 @@ func TestDeleteGitHubPackageVersionByTag_Org404FallsBackToUser(t *testing.T) {
 		}
 		// User-scoped package exists.
 		if r.Method == http.MethodGet {
-			fmt.Fprint(w, ghcrVersionsBody(map[int64][]string{7: {"state-default"}})) //nolint:errcheck // test response write
+			fmt.Fprint(w, ghcrVersionsBody(map[int64][]string{7: {"state-default"}}, testDigest)) //nolint:errcheck // test response write
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	err := deleteGitHubPackageVersionByTag(ctx, srv.Client(), srv.URL, "myorg", "myrepo", "state-default", "tok")
+	err := deleteGitHubPackageVersionByTag(ctx, srv.Client(), srv.URL, "myorg", "myrepo", "state-default", "tok", testDigest)
 	if err != nil {
 		t.Fatalf("expected user-endpoint fallback to succeed, got %v", err)
 	}
@@ -183,20 +192,34 @@ func TestDeleteGitHubPackageVersionByTag_Org404FallsBackToUser(t *testing.T) {
 	}
 }
 
+// fullVersionsPage builds a page of n filler versions (no tags), all with
+// the given digest, to exercise multi-page pagination.
+func fullVersionsPage(startID int64, n int, name string) string {
+	out := make([]githubPackageVersion, 0, n)
+	for i := 0; i < n; i++ {
+		var v githubPackageVersion
+		v.ID = startID + int64(i)
+		v.Name = name
+		out = append(out, v)
+	}
+	b, _ := json.Marshal(out) //nolint:errcheck // marshaling this struct cannot fail
+	return string(b)
+}
+
 func TestDeleteGitHubPackageVersionByTag_TagNotFound(t *testing.T) {
 	t.Run("empty version list", func(t *testing.T) {
 		ctx := context.Background()
 		srv, reqs := newGHCRAPITestServer(t, serveVersionsAndDelete(map[string]string{"1": "[]"}, 0))
 
-		err := deleteGitHubPackageVersionByTag(ctx, srv.Client(), srv.URL, "myorg", "myrepo", "missing-tag", "tok")
+		err := deleteGitHubPackageVersionByTag(ctx, srv.Client(), srv.URL, "myorg", "myrepo", "missing-tag", "tok", testDigest)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
 		if !isHTTPStatus(err, http.StatusNotFound) {
 			t.Errorf("error = %v, want httpStatusErr 404", err)
 		}
-		if !strings.Contains(err.Error(), "tag not found") {
-			t.Errorf("error = %v, want it to mention 'tag not found'", err)
+		if !strings.Contains(err.Error(), "no package version matching tag and digest") {
+			t.Errorf("error = %v, want it to mention tag+digest match failure", err)
 		}
 		// A 404 from the org endpoint triggers the user-endpoint fallback,
 		// which repeats the lookup: one GET per endpoint.
@@ -208,21 +231,21 @@ func TestDeleteGitHubPackageVersionByTag_TagNotFound(t *testing.T) {
 	t.Run("versions with non-matching tags", func(t *testing.T) {
 		ctx := context.Background()
 		srv, reqs := newGHCRAPITestServer(t, serveVersionsAndDelete(map[string]string{
-			"1": ghcrVersionsBody(map[int64][]string{1: {"other"}, 2: {"another"}}),
-			"2": "[]",
+			// Short page (2 < per_page): paging stops after page 1 per endpoint.
+			"1": ghcrVersionsBody(map[int64][]string{1: {"other"}, 2: {"another"}}, testDigest),
 		}, 0))
 
-		err := deleteGitHubPackageVersionByTag(ctx, srv.Client(), srv.URL, "myorg", "myrepo", "missing-tag", "tok")
+		err := deleteGitHubPackageVersionByTag(ctx, srv.Client(), srv.URL, "myorg", "myrepo", "missing-tag", "tok", testDigest)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
 		if !isHTTPStatus(err, http.StatusNotFound) {
 			t.Errorf("error = %v, want httpStatusErr 404", err)
 		}
-		// Page 2 (empty) is consulted per endpoint, and the user endpoint is
-		// retried after the org endpoint reports the tag missing.
-		if n := len(reqs()); n != 4 {
-			t.Errorf("requests = %d, want 4 (org p1, org p2, user p1, user p2)", n)
+		// The user endpoint is retried after the org endpoint reports the
+		// tag missing; the short page ends each lookup after one GET.
+		if n := len(reqs()); n != 2 {
+			t.Errorf("requests = %d, want 2 (org GET, user GET)", n)
 		}
 	})
 }
@@ -249,7 +272,7 @@ func TestDeleteGitHubPackageVersionByTag_ListErrors(t *testing.T) {
 				fmt.Fprint(w, tt.body) //nolint:errcheck // test response write
 			})
 
-			err := deleteGitHubPackageVersionByTag(ctx, srv.Client(), srv.URL, "myorg", "myrepo", "state-default", "tok")
+			err := deleteGitHubPackageVersionByTag(ctx, srv.Client(), srv.URL, "myorg", "myrepo", "state-default", "tok", testDigest)
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
@@ -280,11 +303,11 @@ func TestDeleteGitHubPackageVersionByTag_DeleteFailureModes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
 			srv, _ := newGHCRAPITestServer(t, serveVersionsAndDelete(
-				map[string]string{"1": ghcrVersionsBody(map[int64][]string{42: {"state-default"}})},
+				map[string]string{"1": ghcrVersionsBody(map[int64][]string{42: {"state-default"}}, testDigest)},
 				tt.delStatus,
 			))
 
-			err := deleteGitHubPackageVersionByTag(ctx, srv.Client(), srv.URL, "myorg", "myrepo", "state-default", "tok")
+			err := deleteGitHubPackageVersionByTag(ctx, srv.Client(), srv.URL, "myorg", "myrepo", "state-default", "tok", testDigest)
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
@@ -297,15 +320,17 @@ func TestDeleteGitHubPackageVersionByTag_DeleteFailureModes(t *testing.T) {
 
 func TestFindGitHubVersionIDByTag_PaginatesUntilTagFound(t *testing.T) {
 	ctx := context.Background()
+	// Pages 1 and 2 are full (per_page entries) so paging continues; page 3
+	// carries the target.
 	pages := map[string]string{
-		"1": ghcrVersionsBody(map[int64][]string{1: {"state-a"}}),
-		"2": ghcrVersionsBody(map[int64][]string{2: {"state-b"}}),
-		"3": ghcrVersionsBody(map[int64][]string{3: {"state-ws-default"}}),
+		"1": fullVersionsPage(1, githubVersionsPerPage, testDigest),
+		"2": fullVersionsPage(200, githubVersionsPerPage, testDigest),
+		"3": ghcrVersionsBody(map[int64][]string{3: {"state-ws-default"}}, testDigest),
 	}
 	srv, reqs := newGHCRAPITestServer(t, serveVersionsAndDelete(pages, 0))
 
 	base := srv.URL + "/orgs/myorg/packages/container/myrepo"
-	id, err := findGitHubVersionIDByTag(ctx, srv.Client(), base, "state-ws-default", "tok")
+	id, err := findGitHubVersionIDByTag(ctx, srv.Client(), base, "state-ws-default", "tok", testDigest)
 	if err != nil {
 		t.Fatalf("find: %v", err)
 	}
@@ -324,24 +349,43 @@ func TestFindGitHubVersionIDByTag_PaginatesUntilTagFound(t *testing.T) {
 	}
 }
 
-func TestFindGitHubVersionIDByTag_StopsAtMaxPages(t *testing.T) {
-	// A tag that never appears must stop after githubMaxVersionPages pages,
-	// not loop forever against a server that always returns versions.
+func TestFindGitHubVersionIDByTag_PaginatesPastOldCap(t *testing.T) {
+	// The tag lives on page 22 — beyond the fixed 20-page cap that used to
+	// stop the search. Filler pages are full (per_page entries) so paging
+	// continues; page 23 is empty and ends it.
 	ctx := context.Background()
-	body := ghcrVersionsBody(map[int64][]string{1: {"other"}})
-	srv, reqs := newGHCRAPITestServer(t, func(w http.ResponseWriter, r recordedRequest) {
-		fmt.Fprint(w, body) //nolint:errcheck // test response write
-	})
+	pages := make(map[string]string)
+	for p := 1; p <= 21; p++ {
+		pages[strconv.Itoa(p)] = fullVersionsPage(int64(p)*100, githubVersionsPerPage, testDigest)
+	}
+	pages["22"] = ghcrVersionsBody(map[int64][]string{99: {"state-ws-default"}}, testDigest)
+	pages["23"] = "[]"
+	srv, reqs := newGHCRAPITestServer(t, serveVersionsAndDelete(pages, 0))
 
-	id, err := findGitHubVersionIDByTag(ctx, srv.Client(), srv.URL, "never-present", "tok")
+	base := srv.URL + "/orgs/myorg/packages/container/myrepo"
+	id, err := findGitHubVersionIDByTag(ctx, srv.Client(), base, "state-ws-default", "tok", testDigest)
 	if err != nil {
 		t.Fatalf("find: %v", err)
 	}
-	if id != 0 {
-		t.Errorf("id = %d, want 0", id)
+	if id != 99 {
+		t.Errorf("id = %d, want 99", id)
 	}
-	if n := len(reqs()); n != githubMaxVersionPages {
-		t.Errorf("requests = %d, want %d", n, githubMaxVersionPages)
+	if n := len(reqs()); n != 22 {
+		t.Errorf("requests = %d, want 22 (21 filler pages + target page)", n)
+	}
+}
+
+func TestFindGitHubVersionIDByTag_ContextCancelled(t *testing.T) {
+	// Cancellation must surface as an error, not a silent "not found".
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	srv, _ := newGHCRAPITestServer(t, func(w http.ResponseWriter, r recordedRequest) {
+		fmt.Fprint(w, ghcrVersionsBody(map[int64][]string{1: {"other"}}, testDigest)) //nolint:errcheck // test response write
+	})
+
+	_, err := findGitHubVersionIDByTag(ctx, srv.Client(), srv.URL, "state-x", "tok", testDigest)
+	if err == nil {
+		t.Fatal("expected error after context cancellation, got nil")
 	}
 }
 
@@ -395,30 +439,80 @@ func TestGitHubRequest(t *testing.T) {
 }
 
 func TestFindVersionIDWithTag(t *testing.T) {
-	var v1, v2 githubPackageVersion
-	v1.ID = 1
-	v1.Metadata.Container.Tags = []string{"a", "b"}
-	v2.ID = 2
-	v2.Metadata.Container.Tags = []string{"c"}
+	mk := func(id int64, name string, tags ...string) githubPackageVersion {
+		var v githubPackageVersion
+		v.ID = id
+		v.Name = name
+		v.Metadata.Container.Tags = tags
+		return v
+	}
 
 	tests := []struct {
 		name     string
 		versions []githubPackageVersion
 		tag      string
+		digest   string
 		want     int64
 	}{
-		{name: "found in first version", versions: []githubPackageVersion{v1, v2}, tag: "b", want: 1},
-		{name: "found in later version", versions: []githubPackageVersion{v1, v2}, tag: "c", want: 2},
-		{name: "not found", versions: []githubPackageVersion{v1, v2}, tag: "z", want: 0},
-		{name: "empty versions", versions: nil, tag: "a", want: 0},
-		{name: "version with no tags", versions: func() []githubPackageVersion { var v githubPackageVersion; v.ID = 9; return []githubPackageVersion{v} }(), tag: "a", want: 0},
+		{name: "found in first version", versions: []githubPackageVersion{mk(1, testDigest, "a", "b"), mk(2, testDigest, "c")}, tag: "b", digest: testDigest, want: 1},
+		{name: "found in later version", versions: []githubPackageVersion{mk(1, testDigest, "a"), mk(2, testDigest, "c")}, tag: "c", digest: testDigest, want: 2},
+		{name: "not found", versions: []githubPackageVersion{mk(1, testDigest, "a")}, tag: "z", digest: testDigest, want: 0},
+		{name: "empty versions", versions: nil, tag: "a", digest: testDigest, want: 0},
+		{name: "version with no tags", versions: []githubPackageVersion{mk(9, testDigest)}, tag: "a", digest: testDigest, want: 0},
+		{name: "tag matches but digest differs", versions: []githubPackageVersion{mk(1, otherDigest, "a")}, tag: "a", digest: testDigest, want: 0},
+		{name: "digest matches but tag differs", versions: []githubPackageVersion{mk(1, testDigest, "a")}, tag: "a", digest: otherDigest, want: 0},
+		{name: "empty name never matches", versions: []githubPackageVersion{mk(1, "", "a")}, tag: "a", digest: testDigest, want: 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := findVersionIDWithTag(tt.versions, tt.tag); got != tt.want {
+			if got := findVersionIDWithTag(tt.versions, tt.tag, tt.digest); got != tt.want {
 				t.Errorf("findVersionIDWithTag = %d, want %d", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestDeleteGitHubPackageVersionByTag_DigestMismatch: a version carrying the
+// tag but a different digest must NOT be deleted — DELETE by version ID
+// removes the digest and ALL its tags, so it would destroy another manifest
+// sharing the tag.
+func TestDeleteGitHubPackageVersionByTag_DigestMismatch(t *testing.T) {
+	ctx := context.Background()
+	srv, reqs := newGHCRAPITestServer(t, serveVersionsAndDelete(map[string]string{
+		"1": ghcrVersionsBody(map[int64][]string{42: {"state-default"}}, otherDigest),
+	}, 0))
+
+	err := deleteGitHubPackageVersionByTag(ctx, srv.Client(), srv.URL, "myorg", "myrepo", "state-default", "tok", testDigest)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !isHTTPStatus(err, http.StatusNotFound) {
+		t.Errorf("error = %v, want httpStatusErr 404", err)
+	}
+	for _, r := range reqs() {
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want only GET (no DELETE on digest mismatch)", r.Method)
+		}
+	}
+}
+
+// TestFindGitHubVersionIDByTag_StopsAtShortPage: a page with fewer entries
+// than githubVersionsPerPage is the last page — no further request.
+func TestFindGitHubVersionIDByTag_StopsAtShortPage(t *testing.T) {
+	ctx := context.Background()
+	srv, reqs := newGHCRAPITestServer(t, serveVersionsAndDelete(map[string]string{
+		"1": ghcrVersionsBody(map[int64][]string{1: {"other"}, 2: {"another"}}, testDigest),
+	}, 0))
+
+	id, err := findGitHubVersionIDByTag(ctx, srv.Client(), srv.URL, "missing-tag", "tok", testDigest)
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if id != 0 {
+		t.Errorf("id = %d, want 0", id)
+	}
+	if n := len(reqs()); n != 1 {
+		t.Errorf("requests = %d, want 1 (short page terminates paging)", n)
 	}
 }
 
@@ -432,7 +526,7 @@ func TestTryDeleteGHCRTag_PassesTokenAndClientToGitHubAPI(t *testing.T) {
 		gotReqs = append(gotReqs, r)
 		if r.Method == http.MethodGet {
 			return fakeGitHubResponse(http.StatusOK,
-				ghcrVersionsBody(map[int64][]string{7: {"state-default"}})), nil
+				ghcrVersionsBody(map[int64][]string{7: {"state-default"}}, testDigest)), nil
 		}
 		return fakeGitHubResponse(http.StatusNoContent, ""), nil
 	})}
@@ -444,7 +538,7 @@ func TestTryDeleteGHCRTag_PassesTokenAndClientToGitHubAPI(t *testing.T) {
 		httpClient: client,
 	}
 
-	if err := tryDeleteGHCRTag(context.Background(), repo, "state-default"); err != nil {
+	if err := tryDeleteGHCRTag(context.Background(), repo, "state-default", testDigest); err != nil {
 		t.Fatalf("tryDeleteGHCRTag: %v", err)
 	}
 
@@ -471,7 +565,7 @@ func TestTryDeleteGHCRTag_PropagatesGitHubAPIError(t *testing.T) {
 		httpClient: client,
 	}
 
-	err := tryDeleteGHCRTag(context.Background(), repo, "state-default")
+	err := tryDeleteGHCRTag(context.Background(), repo, "state-default", testDigest)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -486,7 +580,7 @@ func TestTryDeleteGHCRTag_NoToken(t *testing.T) {
 		repository: "ghcr.io/myorg/myrepo",
 	}
 
-	err := tryDeleteGHCRTag(context.Background(), repo, "state-default")
+	err := tryDeleteGHCRTag(context.Background(), repo, "state-default", testDigest)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}

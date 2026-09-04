@@ -24,4 +24,5 @@ dist/
 .claude/
 .opencode/
 .slim/
+.slim/deepwork/
 skills-lock.json

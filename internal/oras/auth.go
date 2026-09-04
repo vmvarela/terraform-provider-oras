@@ -44,7 +44,10 @@ func BuildHTTPClient(insecure bool, caFile string) (*http.Client, error) {
 		t.TLSClientConfig.RootCAs = pool
 	}
 
-	return &http.Client{Transport: t, Timeout: 30 * time.Second}, nil
+	// No overall client Timeout: individual operations carry their own
+	// context (with deadlines set by the caller), and a fixed 30s cap breaks
+	// long-running transfers such as large state pushes.
+	return &http.Client{Transport: t}, nil
 }
 
 // Version is the provider version, set at build time via -ldflags (e.g. -X 'oras.Version=1.0.0').
@@ -144,6 +147,10 @@ func NewClient(registry, repository string, cfg Config) (*Client, error) {
 // newORASRepositoryClient creates the underlying ORAS repository client with
 // the given configuration.
 func newORASRepositoryClient(registry, repository string, cfg Config) (*orasRepositoryClient, error) {
+	// Normalize the host (lowercase, strip scheme//v1 suffixes) so token
+	// selection, the GHCR delete fallback, and credential matching all agree
+	// even when the user configures "GHCR.IO" or "https://ghcr.io".
+	registry = normalizeRegistryHost(registry)
 	fullRef := registry + "/" + repository
 
 	repo, err := orasRemote.NewRepository(fullRef)
@@ -243,6 +250,10 @@ func tokenCredential(registry, token string) orasAuth.Credential {
 }
 
 func resolveCredentials(registry, repository string, cfg Config) (orasAuth.CredentialFunc, string, orasAuth.Credential) {
+	// Normalize the host so case variants ("GHCR.IO") and Docker-style keys
+	// ("https://ghcr.io/v1/") match the GHCR-specific paths below.
+	registry = normalizeRegistryHost(registry)
+
 	// Priority 1: Explicit token
 	if cfg.Token != "" {
 		cred := tokenCredential(registry, cfg.Token)

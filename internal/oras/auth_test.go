@@ -149,6 +149,10 @@ func TestBuildHTTPClient(t *testing.T) {
 		if client == nil {
 			t.Fatal("client is nil")
 		}
+		// No fixed overall timeout: operations carry their own context.
+		if client.Timeout != 0 {
+			t.Errorf("Timeout = %v, want 0 (context-driven deadlines only)", client.Timeout)
+		}
 	})
 
 	t.Run("insecure client", func(t *testing.T) {

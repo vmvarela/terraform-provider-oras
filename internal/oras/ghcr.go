@@ -24,12 +24,12 @@ const (
 	ghcrHost              = "ghcr.io"
 	githubAPIBaseURL      = "https://api.github.com"
 	githubAPIVersion      = "2022-11-28"
-	githubMaxVersionPages = 20
 	githubVersionsPerPage = 100
 )
 
 type githubPackageVersion struct {
-	ID       int64 `json:"id"`
+	ID       int64  `json:"id"`
+	Name     string `json:"name"` // full digest of the manifest, e.g. "sha256:..."
 	Metadata struct {
 		Container struct {
 			Tags []string `json:"tags"`
@@ -37,7 +37,7 @@ type githubPackageVersion struct {
 	} `json:"metadata"`
 }
 
-func tryDeleteGHCRTag(ctx context.Context, repo *orasRepositoryClient, tag string) error {
+func tryDeleteGHCRTag(ctx context.Context, repo *orasRepositoryClient, tag, expectedDigest string) error {
 	if repo == nil {
 		return fmt.Errorf("nil repository client")
 	}
@@ -63,7 +63,7 @@ func tryDeleteGHCRTag(ctx context.Context, repo *orasRepositoryClient, tag strin
 		client = &http.Client{}
 	}
 
-	return deleteGitHubPackageVersionByTag(ctx, client, githubAPIBaseURL, owner, packageName, tag, token)
+	return deleteGitHubPackageVersionByTag(ctx, client, githubAPIBaseURL, owner, packageName, tag, token, expectedDigest)
 }
 
 func parseGHCRRepository(repository string) (host, owner, packageName string, err error) {
@@ -83,37 +83,44 @@ func parseGHCRRepository(repository string) (host, owner, packageName string, er
 	return host, owner, packageName, nil
 }
 
-func deleteGitHubPackageVersionByTag(ctx context.Context, client *http.Client, baseURL, owner, packageName, tag, token string) error {
+func deleteGitHubPackageVersionByTag(ctx context.Context, client *http.Client, baseURL, owner, packageName, tag, token, expectedDigest string) error {
 	baseURL = strings.TrimRight(baseURL, "/")
 	pkgEscaped := url.PathEscape(packageName)
 	ownerEscaped := url.PathEscape(owner)
 
 	orgBase := fmt.Sprintf("%s/orgs/%s/packages/container/%s", baseURL, ownerEscaped, pkgEscaped)
-	if err := deleteFromGitHubPackagesEndpoint(ctx, client, orgBase, tag, token); err == nil {
+	if err := deleteFromGitHubPackagesEndpoint(ctx, client, orgBase, tag, token, expectedDigest); err == nil {
 		return nil
 	} else if !isHTTPStatus(err, http.StatusNotFound) {
 		return err
 	}
 
 	userBase := fmt.Sprintf("%s/users/%s/packages/container/%s", baseURL, ownerEscaped, pkgEscaped)
-	return deleteFromGitHubPackagesEndpoint(ctx, client, userBase, tag, token)
+	return deleteFromGitHubPackagesEndpoint(ctx, client, userBase, tag, token, expectedDigest)
 }
 
-func deleteFromGitHubPackagesEndpoint(ctx context.Context, client *http.Client, baseURL, tag, token string) error {
-	versionID, err := findGitHubVersionIDByTag(ctx, client, baseURL, tag, token)
+func deleteFromGitHubPackagesEndpoint(ctx context.Context, client *http.Client, baseURL, tag, token, expectedDigest string) error {
+	versionID, err := findGitHubVersionIDByTag(ctx, client, baseURL, tag, token, expectedDigest)
 	if err != nil {
 		return err
 	}
 	if versionID == 0 {
-		return newHTTPStatusError(http.StatusNotFound, "tag not found in package versions")
+		return newHTTPStatusError(http.StatusNotFound, "no package version matching tag and digest")
 	}
 
 	deleteURL := fmt.Sprintf("%s/versions/%d", baseURL, versionID)
 	return githubRequest(ctx, client, http.MethodDelete, deleteURL, token, "delete package version", http.StatusNoContent, nil)
 }
 
-func findGitHubVersionIDByTag(ctx context.Context, client *http.Client, baseURL, tag, token string) (int64, error) {
-	for page := 1; page <= githubMaxVersionPages; page++ {
+// findGitHubVersionIDByTag pages through the package's versions looking for a
+// version whose tags contain tag AND whose top-level "name" digest equals
+// expectedDigest. A tag-only match is not enough: the DELETE by version ID
+// removes the digest and ALL its tags, so a digest mismatch would destroy
+// another manifest sharing the tag. Paging stops at an empty or short page
+// (fewer than githubVersionsPerPage entries means the API returned
+// everything); context cancellation surfaces as an error.
+func findGitHubVersionIDByTag(ctx context.Context, client *http.Client, baseURL, tag, token, expectedDigest string) (int64, error) {
+	for page := 1; ; page++ {
 		versions, err := listGitHubPackageVersions(ctx, client, baseURL, page, token)
 		if err != nil {
 			return 0, err
@@ -122,8 +129,11 @@ func findGitHubVersionIDByTag(ctx context.Context, client *http.Client, baseURL,
 			break
 		}
 
-		if id := findVersionIDWithTag(versions, tag); id != 0 {
+		if id := findVersionIDWithTag(versions, tag, expectedDigest); id != 0 {
 			return id, nil
+		}
+		if len(versions) < githubVersionsPerPage {
+			break
 		}
 	}
 	return 0, nil
@@ -146,8 +156,14 @@ func listGitHubPackageVersions(ctx context.Context, client *http.Client, baseURL
 	return versions, nil
 }
 
-func findVersionIDWithTag(versions []githubPackageVersion, tag string) int64 {
+// findVersionIDWithTag returns the ID of the first version matching BOTH the
+// tag and the expected digest ("name" field). Anything else — tag hit on a
+// different digest, digest hit without the tag — is not a match.
+func findVersionIDWithTag(versions []githubPackageVersion, tag, expectedDigest string) int64 {
 	for _, v := range versions {
+		if v.Name != expectedDigest {
+			continue
+		}
 		for _, t := range v.Metadata.Container.Tags {
 			if t == tag {
 				return v.ID

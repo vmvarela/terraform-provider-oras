@@ -520,11 +520,55 @@ func TestDelete_ToleratesDeleteUnsupported(t *testing.T) {
 
 	client := newTestClient(&orasRepositoryClient{inner: unsupportedRepo, repository: "ghcr.io/test/repo"})
 	err := client.Delete(ctx, "default")
-	// When Delete returns 405 (MethodNotAllowed), the workspaceClient.delete
-	// returns that error because there's no fallback for state deletion
-	// (only lock deletion has the unlock fallback). So we expect an error.
+	// When Delete returns 405 (MethodNotAllowed), workspaceClient.delete now
+	// tries the GHCR Packages API fallback. With no token available the
+	// fallback fails, so an error with a clear cause is still expected.
 	if err == nil {
 		t.Fatalf("expected Delete to return error for delete-unsupported repo")
+	}
+}
+
+// TestDelete_GHCRFallbackCallsPackagesAPI proves the 405 fallback in
+// workspaceClient.delete reaches the GitHub Packages API (list + delete) via
+// the repo's HTTP client and token, and that the version it deletes carries
+// the digest of the manifest it was asked to remove.
+func TestDelete_GHCRFallbackCallsPackagesAPI(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeORASRepo()
+	normalRepo := &orasRepositoryClient{inner: fake}
+	wc := newRemoteClient(normalRepo, "default")
+	if err := wc.put(ctx, []byte("state-data")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	desc, err := fake.Resolve(ctx, wc.stateTag)
+	if err != nil {
+		t.Fatalf("resolve state tag: %v", err)
+	}
+	stateDigest := desc.Digest.String()
+
+	var deletePath string
+	ghcrClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method == http.MethodGet {
+			return fakeGitHubResponse(http.StatusOK,
+				ghcrVersionsBody(map[int64][]string{11: {"state-default"}}, stateDigest)), nil
+		}
+		deletePath = r.URL.Path
+		return fakeGitHubResponse(http.StatusNoContent, ""), nil
+	})}
+	unsupportedRepo := &deleteUnsupportedRepo{delegatingRepo: delegatingRepo{inner: fake}}
+	repo := &orasRepositoryClient{
+		inner:      unsupportedRepo,
+		repository: "ghcr.io/myorg/myrepo",
+		token:      "tok-123",
+		httpClient: ghcrClient,
+	}
+
+	client := newTestClient(repo)
+	if err := client.Delete(ctx, "default"); err != nil {
+		t.Fatalf("Delete with GHCR fallback: %v", err)
+	}
+	if deletePath != "/orgs/myorg/packages/container/myrepo/versions/11" {
+		t.Errorf("delete path = %q, want /orgs/myorg/packages/container/myrepo/versions/11", deletePath)
 	}
 }
 
@@ -1209,6 +1253,244 @@ func TestRemoteClient_Lock_RaceConditionDetection(t *testing.T) {
 	}
 }
 
+// lateRivalRepo simulates a rival that acquires the lock AFTER our first
+// post-write verification: the first successful Fetch (our verification read)
+// completes normally, then the rival overwrites the lock tag. Only a second
+// stability read can detect this interleaving — the first verification has
+// already passed.
+type lateRivalRepo struct {
+	delegatingRepo
+	mu        sync.Mutex
+	lockTag   string
+	fired     bool
+	rivalDesc ocispec.Descriptor
+	rivalData []byte
+}
+
+func (r *lateRivalRepo) Fetch(ctx context.Context, target ocispec.Descriptor) (io.ReadCloser, error) {
+	rc, err := r.delegatingRepo.Fetch(ctx, target)
+	if err != nil {
+		return rc, err
+	}
+	r.mu.Lock()
+	first := !r.fired
+	r.fired = true
+	r.mu.Unlock()
+	if first {
+		// Deterministic: the rival's tag overwrite happens synchronously
+		// before the next read, not on a timer.
+		_ = r.Push(ctx, r.rivalDesc, bytes.NewReader(r.rivalData))
+		_ = r.Tag(ctx, r.rivalDesc, r.lockTag)
+	}
+	return rc, nil
+}
+
+// TestRemoteClient_Lock_LateRivalDetectedByStabilityRead covers the
+// cold-start interleaving where a rival tags the lock after the first
+// verification read. Without the second stability read this test fails
+// (lock succeeds); with it, lock reports contention and leaves the rival's
+// tag untouched.
+func TestRemoteClient_Lock_LateRivalDetectedByStabilityRead(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeORASRepo()
+
+	rivalDesc, rivalData := newRivalLockManifest(ctx, t, fake, "late-rival", 2)
+	raceRepo := &lateRivalRepo{
+		delegatingRepo: delegatingRepo{inner: fake},
+		rivalDesc:      rivalDesc,
+		rivalData:      rivalData,
+	}
+	repo := &orasRepositoryClient{inner: raceRepo}
+	c := newRemoteClient(repo, "default")
+	raceRepo.lockTag = c.lockTag
+
+	_, err := c.lock(ctx, &LockInfo{ID: "me", Operation: "apply", Created: time.Now()})
+	if err == nil {
+		t.Fatal("expected lock to fail when a rival tags after first verification, got nil")
+	}
+	var lockErr *LockError
+	if !errors.As(err, &lockErr) {
+		t.Fatalf("expected *LockError, got %T: %v", err, err)
+	}
+	if lockErr.Info == nil || lockErr.Info.ID != "late-rival" {
+		t.Errorf("LockError.Info = %+v, want holder %q", lockErr.Info, "late-rival")
+	}
+	// The rival's tag must not have been cleared: it still resolves to the
+	// rival manifest.
+	desc, rerr := fake.Resolve(ctx, c.lockTag)
+	if rerr != nil || desc.Digest != rivalDesc.Digest {
+		t.Errorf("lock tag resolves to %v (err %v), want rival digest %s", desc.Digest, rerr, rivalDesc.Digest)
+	}
+}
+
+func TestRemoteClient_RetagToUnlocked_DetectsRivalRetag(t *testing.T) {
+	// After tagging the lock marker to the unlocked manifest, a rival
+	// re-tags the lock with its own lock manifest. The read-back in
+	// retagToUnlocked must surface this instead of reporting success.
+	ctx := context.Background()
+	fake := newFakeORASRepo()
+
+	rivalDesc, rivalData := newRivalLockManifest(ctx, t, fake, "relocker", 3)
+	raceRepo := &raceSimulatingRepo{
+		delegatingRepo: delegatingRepo{inner: fake},
+		rivalDesc:      rivalDesc,
+		rivalData:      rivalData,
+	}
+	repo := &orasRepositoryClient{inner: raceRepo}
+	c := newRemoteClient(repo, "default")
+	raceRepo.raceTag = c.lockTag
+
+	if err := c.retagToUnlocked(ctx, ""); err == nil {
+		t.Fatal("expected retagToUnlocked to detect rival retag of lock tag, got nil")
+	}
+}
+
+// preflightRivalRepo hijacks the retag write: when the caller tags the lock
+// tag, the rival's manifest is written instead. This is the interleaving
+// where the preflight re-Resolve has already passed and the rival wins
+// exactly at the Tag — only the read-back can catch it.
+type preflightRivalRepo struct {
+	delegatingRepo
+	raceTag   string
+	rivalDesc ocispec.Descriptor
+	rivalData []byte
+}
+
+func (r *preflightRivalRepo) Tag(ctx context.Context, desc ocispec.Descriptor, reference string) error {
+	if reference == r.raceTag {
+		_ = r.Push(ctx, r.rivalDesc, bytes.NewReader(r.rivalData))
+		return r.delegatingRepo.Tag(ctx, r.rivalDesc, reference)
+	}
+	return r.delegatingRepo.Tag(ctx, desc, reference)
+}
+
+func TestRemoteClient_RetagToUnlocked_RivalWinsBetweenPreflightAndRetag(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeORASRepo()
+
+	rivalDesc, rivalData := newRivalLockManifest(ctx, t, fake, "preflight-rival", 5)
+	repo := &orasRepositoryClient{inner: &preflightRivalRepo{
+		delegatingRepo: delegatingRepo{inner: fake},
+		raceTag:        lockTagPrefix + workspaceTagFor("default"),
+		rivalDesc:      rivalDesc,
+		rivalData:      rivalData,
+	}}
+	c := newRemoteClient(repo, "default")
+
+	// Cold start: no lock tag, so the preflight re-Resolve finds nothing and
+	// proceeds; the rival hijacks the retag write; the read-back must abort.
+	if err := c.retagToUnlocked(ctx, ""); err == nil {
+		t.Fatal("expected retagToUnlocked to abort when the rival wins between preflight and retag, got nil")
+	}
+	// The rival's manifest must still own the lock tag.
+	desc, rerr := fake.Resolve(ctx, c.lockTag)
+	if rerr != nil || desc.Digest != rivalDesc.Digest {
+		t.Errorf("lock tag resolves to %v (err %v), want rival digest %s", desc.Digest, rerr, rivalDesc.Digest)
+	}
+}
+
+// TestRemoteClient_RetagToUnlocked_AbortsWhenTagMovedBeforeRetag: the
+// preflight itself must abort when the lock tag no longer points at the
+// digest the caller read — the marker must not overwrite a rival's lock.
+func TestRemoteClient_RetagToUnlocked_AbortsWhenTagMovedBeforeRetag(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeORASRepo()
+
+	rivalDesc, _ := newRivalLockManifest(ctx, t, fake, "early-rival", 7)
+	repo := &orasRepositoryClient{inner: fake}
+	c := newRemoteClient(repo, "default")
+	if err := fake.Tag(ctx, rivalDesc, c.lockTag); err != nil {
+		t.Fatalf("tag rival lock: %v", err)
+	}
+
+	// Caller believes the lock points at some other digest: preflight must
+	// refuse to overwrite the rival's tag.
+	if err := c.retagToUnlocked(ctx, "sha256:"+strings.Repeat("0", 64)); err == nil {
+		t.Fatal("expected retagToUnlocked to abort on moved lock tag, got nil")
+	}
+	desc, rerr := fake.Resolve(ctx, c.lockTag)
+	if rerr != nil || desc.Digest != rivalDesc.Digest {
+		t.Errorf("lock tag resolves to %v (err %v), want rival digest %s", desc.Digest, rerr, rivalDesc.Digest)
+	}
+}
+
+// TestOpContext_DeadlineHandling covers the per-operation deadline helper:
+// caller deadlines are preserved as-is; a caller without one gets the
+// default. No test waits for the 10-minute default.
+func TestOpContext_DeadlineHandling(t *testing.T) {
+	c := &Client{}
+
+	t.Run("preserves caller deadline", func(t *testing.T) {
+		parent, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		parentDeadline, _ := parent.Deadline()
+
+		ctx, cancelOp := c.opContext(parent)
+		defer cancelOp()
+		d, ok := ctx.Deadline()
+		if !ok || !d.Equal(parentDeadline) {
+			t.Errorf("deadline = %v (ok=%v), want caller's %v", d, ok, parentDeadline)
+		}
+	})
+
+	t.Run("applies default when caller has none", func(t *testing.T) {
+		ctx, cancel := c.opContext(context.Background())
+		defer cancel()
+		d, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("expected a deadline, got none")
+		}
+		remaining := time.Until(d)
+		if remaining > defaultOperationTimeout || remaining < defaultOperationTimeout-time.Minute {
+			t.Errorf("remaining = %v, want ~%v", remaining, defaultOperationTimeout)
+		}
+	})
+}
+
+// TestDelete_PropagatesCallerDeadline: the per-operation deadline must flow
+// into the operation — a hung repo aborts at the caller's deadline, not the
+// 10-minute default.
+func TestDelete_PropagatesCallerDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	fake := newFakeORASRepo()
+	client := newTestClient(&orasRepositoryClient{inner: &blockingRepo{delegatingRepo: delegatingRepo{inner: fake}}})
+
+	start := time.Now()
+	err := client.Delete(ctx, "default")
+	if err == nil {
+		t.Fatal("expected deadline error, got nil")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("Delete took %v, caller deadline was not respected", elapsed)
+	}
+}
+
+func TestGroupVersionsByDigest_PropagatesResolveError(t *testing.T) {
+	// Regression: a Resolve failure for a version tag used to be silently
+	// skipped, hiding retention failures. It must now surface with tag
+	// context.
+	ctx := context.Background()
+	fake := newFakeORASRepo()
+	failRepo := &resolveFailingRepo{
+		delegatingRepo: delegatingRepo{inner: fake},
+		resolveErr:     errors.New("resolve boom"),
+	}
+	repo := &orasRepositoryClient{inner: failRepo}
+	c := newRemoteClient(repo, "default")
+
+	_, err := c.groupVersionsByDigest(ctx, []int{1}, "sha256:"+strings.Repeat("0", 64))
+	if err == nil {
+		t.Fatal("expected resolve error to propagate, got nil")
+	}
+	if !strings.Contains(err.Error(), c.versionTagFor(1)) {
+		t.Errorf("error = %v, want it to mention tag %q", err, c.versionTagFor(1))
+	}
+}
+
 func TestRemoteClient_Lock_SameGenerationRaceDetectedByHolderID(t *testing.T) {
 	ctx := context.Background()
 	fake := newFakeORASRepo()
@@ -1594,7 +1876,7 @@ func TestIsTransientError(t *testing.T) {
 		{name: "502 bad gateway", err: &orasErrcode.ErrorResponse{StatusCode: http.StatusBadGateway}, want: true},
 		{name: "503 service unavailable", err: &orasErrcode.ErrorResponse{StatusCode: http.StatusServiceUnavailable}, want: true},
 		{name: "504 gateway timeout", err: &orasErrcode.ErrorResponse{StatusCode: http.StatusGatewayTimeout}, want: true},
-		{name: "500 internal server error", err: &orasErrcode.ErrorResponse{StatusCode: http.StatusInternalServerError}, want: false},
+		{name: "500 internal server error", err: &orasErrcode.ErrorResponse{StatusCode: http.StatusInternalServerError}, want: true},
 		{name: "connection reset", err: &net.OpError{Op: "read", Err: os.NewSyscallError("read", syscall.ECONNRESET)}, want: true},
 		{name: "connection refused", err: &net.OpError{Op: "dial", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}, want: true},
 		{name: "i/o timeout", err: &net.OpError{Op: "read", Err: os.ErrDeadlineExceeded}, want: true},

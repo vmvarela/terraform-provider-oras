@@ -118,7 +118,7 @@ func TestTryDeleteGHCRTag_NotGHCR(t *testing.T) {
 		repository: "registry.example.com/owner/package",
 	}
 
-	err := tryDeleteGHCRTag(t.Context(), repo, "some-tag")
+	err := tryDeleteGHCRTag(t.Context(), repo, "some-tag", testDigest)
 	if err == nil {
 		t.Error("tryDeleteGHCRTag expected error for non-GHCR repository")
 	}
@@ -128,7 +128,7 @@ func TestTryDeleteGHCRTag_NotGHCR(t *testing.T) {
 }
 
 func TestTryDeleteGHCRTag_NilRepo(t *testing.T) {
-	err := tryDeleteGHCRTag(t.Context(), nil, "some-tag")
+	err := tryDeleteGHCRTag(t.Context(), nil, "some-tag", testDigest)
 	if err == nil {
 		t.Error("tryDeleteGHCRTag expected error for nil repository")
 	}
