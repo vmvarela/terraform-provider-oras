@@ -16,7 +16,10 @@ Terraform 1.17 alpha builds (pinned in `.terraform-version`). Set
 ```hcl
 terraform {
   required_providers {
-    oras = { source = "registry.terraform.io/vmvarela/oras", version = "~> 0.1" }
+    # Pin the exact stable version. Pre-release versions (e.g. 0.1.6-alpha)
+    # additionally require an exact pin: Terraform's range operators (~>, >=, …)
+    # never select pre-releases.
+    oras = { source = "registry.terraform.io/vmvarela/oras", version = "0.1.5" }
   }
 
   state_store "oras_oci" {
@@ -45,8 +48,9 @@ Credential resolution: [`docs/guides/authentication.md`](docs/guides/authenticat
 ```bash
 make test                           # unit tests, no external deps
 TF_ORAS_ZOT_TEST=1 make test-zot    # integration: spins Zot via Docker
+make coverage                       # tests + coverage gate (default 80%, COVERAGE_THRESHOLD=N to change)
 make lint
-make install                        # build + install to ~/.terraform.d/...
+make install                        # build + install to ~/.terraform.d/... (VERSION= overrides the mirror dir)
 make dev-override                   # generate .terraformrc.dev pointing at this checkout
 export TF_CLI_CONFIG_FILE=$PWD/.terraformrc.dev
 ```

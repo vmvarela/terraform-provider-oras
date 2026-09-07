@@ -59,6 +59,18 @@ const defaultMaxStateSize int64 = 256 * 1024 * 1024
 // ponytail: fixed 1 MiB cap; raise if OCI manifests ever legitimately exceed it.
 const maxManifestSize int64 = 1 << 20
 
+// lockStabilityDelay is the wait between the first and second lock-tag reads
+// in lock(). It widens the observed window enough to catch a rival that tags
+// between our first verification and the stability re-read, without adding a
+// noticeable latency to lock acquisition.
+const lockStabilityDelay = 100 * time.Millisecond
+
+// lockCleanupTimeout bounds the lock-tag cleanup that runs with a context
+// detached from the caller's: by the time cleanup runs, the caller's context
+// may already be cancelled (stability window expired, verification failed),
+// and a cancelled context would make the cleanup itself fail.
+const lockCleanupTimeout = 30 * time.Second
+
 // Tag naming scheme:
 //   - State is stored at "state-<workspaceTag>".
 //   - State versions are stored at "stver-<workspaceTag>-v<N>".
@@ -159,8 +171,27 @@ func newWorkspaceClient(c *Client, stateID string) *workspaceClient {
 
 // ─── Client ───────────────────────────────────────────────────────────────────
 
+// defaultOperationTimeout bounds public operations when the caller's context
+// carries no deadline. BuildHTTPClient no longer sets a fixed HTTP client
+// timeout (operations are context-driven), so without this a hung registry
+// connection could block indefinitely. 10 minutes is generous for the largest
+// allowed state push (256 MiB over a slow link) while still bounding every
+// operation. Callers that set their own deadline keep it untouched.
+const defaultOperationTimeout = 10 * time.Minute
+
+// opContext returns ctx unchanged (with a no-op cancel) when it already has a
+// deadline; otherwise it derives one with defaultOperationTimeout.
+func (c *Client) opContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, defaultOperationTimeout)
+}
+
 // Get retrieves the state for the given stateID. Returns nil if no state exists.
 func (c *Client) Get(ctx context.Context, stateID string) ([]byte, error) {
+	ctx, cancel := c.opContext(ctx)
+	defer cancel()
 	wc := newWorkspaceClient(c, stateID)
 	return retryWithResult(ctx, func(ctx context.Context) ([]byte, error) {
 		return wc.get(ctx)
@@ -229,6 +260,8 @@ func (wc *workspaceClient) get(ctx context.Context) ([]byte, error) {
 
 // Put stores the state for the given stateID.
 func (c *Client) Put(ctx context.Context, stateID string, data []byte) error {
+	ctx, cancel := c.opContext(ctx)
+	defer cancel()
 	wc := newWorkspaceClient(c, stateID)
 	return retry(ctx, func(ctx context.Context) error {
 		return wc.put(ctx, data)
@@ -304,7 +337,7 @@ func (wc *workspaceClient) put(ctx context.Context, state []byte) error {
 			defer cancel()
 			existing, listErr := wc.listExistingVersions(asyncCtx)
 			if listErr != nil {
-				slog.Debug("async retention: failed to list versions", "error", listErr)
+				slog.Warn("async retention: failed to list versions", "workspace", wc.stateID, "tag", wc.stateTag, "error", listErr)
 				return
 			}
 			found := false
@@ -318,7 +351,7 @@ func (wc *workspaceClient) put(ctx context.Context, state []byte) error {
 				existing = append(existing, nextVersion)
 			}
 			if err := wc.enforceVersionRetention(asyncCtx, manifestDesc, existing); err != nil {
-				slog.Debug("async retention cleanup failed", "error", err)
+				slog.Warn("async retention cleanup failed", "workspace", wc.stateID, "tag", wc.stateTag, "error", err)
 			}
 		}()
 	default:
@@ -331,6 +364,8 @@ func (wc *workspaceClient) put(ctx context.Context, state []byte) error {
 
 // Delete removes the state for the given stateID. Returns nil if no state exists.
 func (c *Client) Delete(ctx context.Context, stateID string) error {
+	ctx, cancel := c.opContext(ctx)
+	defer cancel()
 	wc := newWorkspaceClient(c, stateID)
 	return retry(ctx, func(ctx context.Context) error {
 		return wc.delete(ctx)
@@ -345,11 +380,16 @@ func (wc *workspaceClient) delete(ctx context.Context) error {
 		}
 		return err
 	}
-	return wc.client.repoClient.inner.Delete(ctx, desc)
+	// Reuse the GHCR Packages API fallback: registries like ghcr.io return
+	// HTTP 405 for manifest deletion. Non-GHCR registries without deletion
+	// keep a clear error.
+	return wc.deleteDigestWithFallback(ctx, desc, wc.stateTag)
 }
 
 // Lock acquires a lock for the given stateID. Returns the lock ID on success.
 func (c *Client) Lock(ctx context.Context, stateID string, info LockInfo) (string, error) {
+	ctx, cancel := c.opContext(ctx)
+	defer cancel()
 	wc := newWorkspaceClient(c, stateID)
 	return wc.lock(ctx, &info)
 }
@@ -429,15 +469,23 @@ func (wc *workspaceClient) lock(ctx context.Context, info *LockInfo) (string, er
 	// parsing can fail: content addressing guarantees our own digest fetches
 	// back our own bytes.
 	cleanupOurTag := func() {
-		d, err := wc.client.repoClient.inner.Resolve(ctx, wc.lockTag)
+		// Detached, bounded context: the caller's ctx may already be
+		// cancelled at every cleanup call site (the stability-window branch
+		// literally runs on a cancelled context), and cleanup on a cancelled
+		// context is a no-op that strands the lock until TTL expiry. The
+		// digest check below still guards against clearing a rival's tag.
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), lockCleanupTimeout)
+		defer cancel()
+		d, err := wc.client.repoClient.inner.Resolve(cleanupCtx, wc.lockTag)
 		if err != nil || d.Digest != manifestDesc.Digest {
 			return
 		}
-		if err := wc.client.repoClient.inner.Delete(ctx, d); err != nil && isDeleteUnsupported(err) {
+		if err := wc.client.repoClient.inner.Delete(cleanupCtx, d); err != nil && isDeleteUnsupported(err) {
 			// Registries like GHCR (HTTP 405) can't delete manifests;
 			// retag to "unlocked-" so the workspace isn't locked until
-			// TTL expiry.
-			if retagErr := wc.retagToUnlocked(ctx); retagErr != nil {
+			// TTL expiry. The tag still points at our digest (checked
+			// above), so that is the expected digest for the preflight.
+			if retagErr := wc.retagToUnlocked(cleanupCtx, manifestDesc.Digest.String()); retagErr != nil {
 				slog.Debug("failed to retag lock to unlocked after failed verification", "error", retagErr)
 			}
 		}
@@ -458,13 +506,83 @@ func (wc *workspaceClient) lock(ctx context.Context, info *LockInfo) (string, er
 		return "", &LockError{Info: existing, Err: fmt.Errorf("state is locked (lost race)")}
 	}
 
+	// Stability re-read after a short, context-cancellable wait. OCI tags are
+	// last-writer-wins — registries offer no CAS/If-Match — so a rival that
+	// tags the lock after our first verification would otherwise go undetected.
+	// This narrows the race window but does NOT eliminate it: a rival can
+	// still win immediately after this second read. Generation + read-back is
+	// a mitigation, not strong mutual exclusion.
+	timer := time.NewTimer(lockStabilityDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		cleanupOurTag()
+		return "", ctx.Err()
+	case <-timer.C:
+	}
+
+	// If digest/generation/holder are no longer ours, a rival won: report
+	// contention and do NOT clear a tag that points at another holder.
+	stable, stableDesc, err := wc.fetchManifestWithDesc(ctx, wc.lockTag)
+	if err != nil {
+		cleanupOurTag()
+		return "", fmt.Errorf("failed to confirm lock stability: %w", err)
+	}
+	if stableDesc.Digest != manifestDesc.Digest {
+		existing, _ := parseLockInfo(&stable, wc.stateTag)
+		return "", &LockError{Info: existing, Err: fmt.Errorf("state is locked (lost race)")}
+	}
+	stableData, err := parseLockManifestData(&stable)
+	if err != nil || stableData.Generation != newGeneration || stableData.HolderID != info.ID {
+		existing, _ := parseLockInfo(&stable, wc.stateTag)
+		return "", &LockError{Info: existing, Err: fmt.Errorf("state is locked (lost race)")}
+	}
+
 	return info.ID, nil
 }
 
 // Unlock releases the lock for the given stateID. Returns nil if no lock exists.
 func (c *Client) Unlock(ctx context.Context, stateID, lockID string) error {
+	ctx, cancel := c.opContext(ctx)
+	defer cancel()
 	wc := newWorkspaceClient(c, stateID)
 	return wc.unlock(ctx, lockID)
+}
+
+// VerifyLock reports whether the lock for stateID is still held by lockID: it
+// reads the lock tag and compares the lock holder ID. It returns an error when
+// the lock is gone, held by a different holder, or the check itself fails.
+// There is no CAS on OCI tags, so a caller cannot close the race between a
+// successful VerifyLock and a subsequent Put — this is a best-effort
+// ownership check.
+func (c *Client) VerifyLock(ctx context.Context, stateID, lockID string) error {
+	ctx, cancel := c.opContext(ctx)
+	defer cancel()
+	wc := newWorkspaceClient(c, stateID)
+	return wc.verifyLock(ctx, lockID)
+}
+
+func (wc *workspaceClient) verifyLock(ctx context.Context, lockID string) error {
+	fm, _, err := wc.fetchManifestWithDesc(ctx, wc.lockTag)
+	if err != nil {
+		if isNotFound(err) {
+			return fmt.Errorf("lock for %q no longer exists", wc.lockTag)
+		}
+		return fmt.Errorf("failed to verify lock: %w", err)
+	}
+	existing, err := parseLockInfo(&fm, wc.stateTag)
+	if err != nil {
+		return fmt.Errorf("failed to verify lock: %w", err)
+	}
+	if existing == nil || existing.ID == "" {
+		// Includes the "unlocked-" marker case: the tag points at a
+		// manifest with no holder.
+		return fmt.Errorf("lock for %q no longer exists", wc.lockTag)
+	}
+	if existing.ID != lockID {
+		return fmt.Errorf("lock for %q is held by %q, not %q", wc.lockTag, existing.ID, lockID)
+	}
+	return nil
 }
 
 func (wc *workspaceClient) unlock(ctx context.Context, id string) error {
@@ -497,11 +615,13 @@ func (wc *workspaceClient) unlock(ctx context.Context, id string) error {
 		return err
 	}
 
-	return wc.retagToUnlocked(ctx)
+	return wc.retagToUnlocked(ctx, desc.Digest.String())
 }
 
 // List returns all workspace names stored in the OCI repository.
 func (c *Client) List(ctx context.Context) ([]string, error) {
+	ctx, cancel := c.opContext(ctx)
+	defer cancel()
 	return retryWithResult(ctx, func(ctx context.Context) ([]string, error) {
 		return listWorkspacesFromTags(ctx, c.repoClient)
 	})
@@ -679,8 +799,23 @@ func (wc *workspaceClient) groupVersionsByDigest(ctx context.Context, versions [
 		tag := wc.versionTagFor(v)
 		g.Go(func() error {
 			desc, err := wc.client.repoClient.inner.Resolve(ctx, tag)
-			if err != nil || desc.Digest.String() == currentDigest {
-				return nil //nolint:nilerr
+			if err != nil {
+				if isNotFound(err) {
+					// A concurrent retention (or unlock) may have deleted
+					// this tag between the Tags listing and this Resolve:
+					// nothing left to group, skip it. Any other failure —
+					// auth, network, 5xx — must propagate with tag context
+					// or retention would silently stay incomplete.
+					return nil
+				}
+				// Propagate with tag context: a failed Resolve silently
+				// skipped would leave that version's tags undeletable and
+				// retention perpetually incomplete. The current digest skip
+				// below is unaffected.
+				return fmt.Errorf("resolving %q: %w", tag, err)
+			}
+			if desc.Digest.String() == currentDigest {
+				return nil
 			}
 			key := desc.Digest.String()
 			mu.Lock()
@@ -753,7 +888,7 @@ func (wc *workspaceClient) deleteDigestWithFallback(ctx context.Context, desc oc
 		return err
 	}
 
-	ghErr := tryDeleteGHCRTag(ctx, wc.client.repoClient, fallbackTag)
+	ghErr := tryDeleteGHCRTag(ctx, wc.client.repoClient, fallbackTag, desc.Digest.String())
 	if errors.Is(ghErr, errNotGHCR) {
 		return fmt.Errorf("registry does not support manifest deletion (HTTP 405) and no alternative deletion method is available for %q", fallbackTag)
 	}
@@ -783,10 +918,16 @@ func (wc *workspaceClient) clearLock(ctx context.Context, desc ocispec.Descripto
 	if !isDeleteUnsupported(err) {
 		return err
 	}
-	return wc.retagToUnlocked(ctx)
+	return wc.retagToUnlocked(ctx, desc.Digest.String())
 }
 
-func (wc *workspaceClient) retagToUnlocked(ctx context.Context) error {
+// retagToUnlocked points the lock tag at the "unlocked-" marker manifest, for
+// registries that cannot delete manifests. expectedDigest is the lock digest
+// the caller just read; immediately before the retag the tag is re-resolved
+// and the operation aborts if it moved. This narrows the check→Tag race but
+// does NOT eliminate the residual last-writer-wins window (OCI tags have no
+// CAS); the read-back in verifyUnlockedMarker remains the race detector.
+func (wc *workspaceClient) retagToUnlocked(ctx context.Context, expectedDigest string) error {
 	desc, err := retryWithResult(ctx, func(ctx context.Context) (ocispec.Descriptor, error) {
 		return wc.client.repoClient.inner.Resolve(ctx, wc.unlockedTag)
 	})
@@ -803,9 +944,41 @@ func (wc *workspaceClient) retagToUnlocked(ctx context.Context) error {
 	} else if err != nil {
 		return err
 	}
-	return retry(ctx, func(ctx context.Context) error {
+
+	// Preflight: re-Resolve the lock tag right before overwriting it. A
+	// missing tag is fine (nobody holds the lock); a moved tag means another
+	// holder won — never overwrite their manifest with the marker.
+	current, err := wc.client.repoClient.inner.Resolve(ctx, wc.lockTag)
+	if err != nil && !isNotFound(err) {
+		return fmt.Errorf("failed to check lock tag %q before retag to unlocked: %w", wc.lockTag, err)
+	}
+	if err == nil && current.Digest.String() != expectedDigest {
+		return fmt.Errorf("lock tag %q changed before retag to unlocked (another holder may have re-locked)", wc.lockTag)
+	}
+
+	if err := retry(ctx, func(ctx context.Context) error {
 		return wc.client.repoClient.inner.Tag(ctx, desc, wc.lockTag)
+	}); err != nil {
+		return err
+	}
+	return wc.verifyUnlockedMarker(ctx, desc)
+}
+
+func (wc *workspaceClient) verifyUnlockedMarker(ctx context.Context, marker ocispec.Descriptor) error {
+	// Read-back: OCI tags are last-writer-wins (no CAS), so a rival holder may
+	// have re-tagged the lock between our Tag and this check. Re-Resolve and
+	// confirm the tag points at the marker we just published — this detects
+	// that another holder won, it cannot prevent it.
+	got, err := retryWithResult(ctx, func(ctx context.Context) (ocispec.Descriptor, error) {
+		return wc.client.repoClient.inner.Resolve(ctx, wc.lockTag)
 	})
+	if err != nil {
+		return fmt.Errorf("failed to verify unlocked marker for %q: %w", wc.lockTag, err)
+	}
+	if got.Digest != marker.Digest {
+		return fmt.Errorf("lock tag %q no longer points at the unlocked marker (another holder may have re-locked)", wc.lockTag)
+	}
+	return nil
 }
 
 func (wc *workspaceClient) fetchManifestWithDesc(ctx context.Context, reference string) (ocispec.Manifest, ocispec.Descriptor, error) {
@@ -1018,7 +1191,7 @@ func compressGzip(data []byte) ([]byte, error) {
 
 // ─── Retry helpers ────────────────────────────────────────────────────────────
 //
-// Retry runs operation up to 3 times with exponential backoff (1s, 2s, 4s),
+// Retry runs operation up to 3 times with exponential backoff (1s, 2s),
 // retrying only on transient errors.
 func retry(ctx context.Context, operation func(context.Context) error) error {
 	_, err := retryWithResult(ctx, func(ctx context.Context) (struct{}, error) {
@@ -1072,6 +1245,7 @@ func isTransientError(err error) bool {
 		switch errResp.StatusCode {
 		case http.StatusTooManyRequests,
 			http.StatusRequestTimeout,
+			http.StatusInternalServerError,
 			http.StatusBadGateway,
 			http.StatusServiceUnavailable,
 			http.StatusGatewayTimeout:

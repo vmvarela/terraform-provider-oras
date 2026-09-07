@@ -39,10 +39,33 @@ type cliConfig struct {
 	DefaultProvider *cliDefaultCredentialsBlock `hcl:"oci_default_credentials,block"`
 }
 
+// normalizeRegistryHost canonicalizes registry hosts from Docker-style config
+// keys and user config: strips a leading http:// or https:// scheme, any
+// trailing slash, and lowercases the result (hosts compare
+// case-insensitively, e.g. "GHCR.IO" must resolve like "ghcr.io"). The only
+// "/v1" suffix removed is the legacy Docker Hub endpoint form
+// "index.docker.io/v1"; stripping "/v1" from other keys would collapse
+// repository-scoped keys like "ghcr.io/acme/v1" onto "ghcr.io/acme" and could
+// select the wrong credential.
+func normalizeRegistryHost(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "https://")
+	s = strings.TrimPrefix(s, "http://")
+	s = strings.TrimSuffix(s, "/")
+	s = strings.ToLower(s)
+	if s == "index.docker.io/v1" {
+		// Legacy Docker Hub v1 endpoint key written by older Docker clients.
+		s = "index.docker.io"
+	}
+	return s
+}
+
 // parseConfigKey splits a config key ("ghcr.io", "ghcr.io/org", "") into
 // domain and path. Bare domains have an empty path. Keys with a tag or digest
-// are rejected.
+// are rejected. Docker-style keys ("https://index.docker.io/v1/") and
+// uppercase hosts are normalized before parsing.
 func parseConfigKey(key string) (domain, path string, ok bool) {
+	key = normalizeRegistryHost(key)
 	if key == "" {
 		return "", "", true
 	}
@@ -69,7 +92,7 @@ func configKeyMatch(key, domain, path string) int {
 		return 1
 	}
 	kd, kp, ok := parseConfigKey(key)
-	if !ok || kd != domain {
+	if !ok || kd != normalizeRegistryHost(domain) {
 		return 0
 	}
 	if kp == "" {

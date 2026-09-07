@@ -31,6 +31,15 @@ func clearCredEnv(t *testing.T) {
 	t.Setenv("USERPROFILE", tmpHome)
 }
 
+// setTestHome points HOME and USERPROFILE at dir so os.UserHomeDir() resolves
+// to it on both Unix and Windows. Setting only HOME leaks the real Windows
+// home into dockerConfigPaths().
+func setTestHome(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+}
+
 // writeTestFile writes content to dir/name and returns the full path.
 func writeTestFile(t *testing.T, dir, name, content string) string {
 	t.Helper()
@@ -57,6 +66,35 @@ func writeHelperScript(t *testing.T, name, script string) {
 		t.Fatalf("chmod: %v", err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestNormalizeRegistryHost(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"ghcr.io", "ghcr.io"},
+		{"GHCR.IO", "ghcr.io"},
+		{"https://ghcr.io", "ghcr.io"},
+		{"http://ghcr.io", "ghcr.io"},
+		{"https://index.docker.io/v1/", "index.docker.io"},
+		{"https://index.docker.io/v1", "index.docker.io"},
+		{"index.docker.io/v1/", "index.docker.io"},
+		{"https://INDEX.DOCKER.IO/v1/", "index.docker.io"},
+		// Repository-scoped "/v1" segments must survive: stripping them
+		// would make "ghcr.io/acme/v1" collide with "ghcr.io/acme".
+		{"ghcr.io/acme/v1", "ghcr.io/acme/v1"},
+		{"ghcr.io/acme/v1/", "ghcr.io/acme/v1"},
+		{"https://ghcr.io/acme/v1", "ghcr.io/acme/v1"},
+		{"registry.example.com:5000", "registry.example.com:5000"},
+		{"http://Registry.Example.com:5000", "registry.example.com:5000"},
+		{"ghcr.io/", "ghcr.io"},
+		{"  ghcr.io  ", "ghcr.io"},
+	}
+	for _, tt := range tests {
+		if got := normalizeRegistryHost(tt.in); got != tt.want {
+			t.Errorf("normalizeRegistryHost(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
 }
 
 func TestConfigKeyMatch(t *testing.T) {
@@ -94,6 +132,45 @@ func TestConfigKeyMatch(t *testing.T) {
 	t.Run("domain key matches any path with lower specificity than path key", func(t *testing.T) {
 		if configKeyMatch("ghcr.io", "ghcr.io", "org/app") >= configKeyMatch("ghcr.io/org", "ghcr.io", "org/app") {
 			t.Error("path key should be more specific than domain key")
+		}
+	})
+
+	t.Run("docker hub legacy key matches", func(t *testing.T) {
+		if got := configKeyMatch("https://index.docker.io/v1/", "index.docker.io", "org/app"); got != 2 {
+			t.Errorf("docker hub legacy key = %d, want 2", got)
+		}
+		if got := configKeyMatch("https://index.docker.io/v1/", "index.docker.io", ""); got != 2 {
+			t.Errorf("docker hub legacy key vs empty path = %d, want 2", got)
+		}
+	})
+
+	t.Run("repository /v1 segment does not collapse onto shorter key", func(t *testing.T) {
+		// Regression: normalizeRegistryHost used to strip "/v1" from any key,
+		// so "ghcr.io/acme/v1" matched as "ghcr.io/acme" and could win the
+		// same specificity as (or tie with) the genuinely shorter key.
+		if got := configKeyMatch("ghcr.io/acme/v1", "ghcr.io", "acme/v1"); got != 4 {
+			t.Errorf("configKeyMatch(ghcr.io/acme/v1) = %d, want 4 (two path segments)", got)
+		}
+		if got := configKeyMatch("ghcr.io/acme/v1", "ghcr.io", "acme/other"); got != 0 {
+			t.Errorf("configKeyMatch(ghcr.io/acme/v1 vs acme/other) = %d, want 0", got)
+		}
+	})
+
+	t.Run("uppercase host key matches lowercase domain", func(t *testing.T) {
+		if got := configKeyMatch("GHCR.IO", "ghcr.io", "org/app"); got != 2 {
+			t.Errorf("uppercase key = %d, want 2", got)
+		}
+		if got := configKeyMatch("ghcr.io", "GHCR.IO", "org/app"); got != 2 {
+			t.Errorf("uppercase domain = %d, want 2", got)
+		}
+	})
+
+	t.Run("host with port matches exactly", func(t *testing.T) {
+		if got := configKeyMatch("registry.example.com:5000", "registry.example.com:5000", ""); got != 2 {
+			t.Errorf("port key = %d, want 2", got)
+		}
+		if got := configKeyMatch("registry.example.com:5000", "registry.example.com", ""); got != 0 {
+			t.Errorf("port key vs different port = %d, want 0", got)
 		}
 	})
 }
@@ -162,7 +239,7 @@ func TestResolveConfiguredCredential_DockerConfig(t *testing.T) {
 
 	t.Run("empty auth skipped", func(t *testing.T) {
 		dir := t.TempDir()
-		t.Setenv("HOME", dir)
+		setTestHome(t, dir)
 		writeTestFile(t, dir, ".docker/config.json", `{
 			"auths": {"ghcr.io": {"auth": ""}}
 		}`)
@@ -180,7 +257,7 @@ func TestResolveConfiguredCredential_DockerConfig(t *testing.T) {
 
 	t.Run("credHelpers", func(t *testing.T) {
 		dir := t.TempDir()
-		t.Setenv("HOME", dir)
+		setTestHome(t, dir)
 		writeTestFile(t, dir, ".docker/config.json", `{
 			"credHelpers": {"ghcr.io": "testhelper"}
 		}`)
@@ -194,7 +271,7 @@ func TestResolveConfiguredCredential_DockerConfig(t *testing.T) {
 
 	t.Run("credsStore", func(t *testing.T) {
 		dir := t.TempDir()
-		t.Setenv("HOME", dir)
+		setTestHome(t, dir)
 		writeTestFile(t, dir, ".docker/config.json", `{"credsStore": "teststore"}`)
 		writeHelperScript(t, "docker-credential-teststore", `echo '{"ServerURL":"https://ghcr.io","Username":"su","Secret":"sp"}'`)
 
@@ -208,7 +285,7 @@ func TestResolveConfiguredCredential_DockerConfig(t *testing.T) {
 		dir := t.TempDir()
 		home := t.TempDir()
 		t.Setenv("XDG_CONFIG_HOME", dir)
-		t.Setenv("HOME", home)
+		setTestHome(t, home)
 		writeTestFile(t, dir, "containers/auth.json", `{
 			"auths": {"ghcr.io": {"auth": "`+base64.StdEncoding.EncodeToString([]byte("containers:ct"))+`"}}
 		}`)
@@ -219,6 +296,41 @@ func TestResolveConfiguredCredential_DockerConfig(t *testing.T) {
 		cred, ok := resolveConfiguredCredential(context.Background(), "ghcr.io", "org/app")
 		if !ok || cred.Username != "containers" {
 			t.Errorf("got ok=%v cred=%+v, want containers (first source wins on tie)", ok, cred)
+		}
+	})
+
+	t.Run("ghcr.io/acme and ghcr.io/acme/v1 keep distinct credentials", func(t *testing.T) {
+		// Regression: both keys used to normalize to "ghcr.io/acme", so the
+		// map order decided which secret was returned for acme/v1.
+		dir := t.TempDir()
+		setTestHome(t, dir)
+		writeTestFile(t, dir, ".docker/config.json", `{
+			"auths": {
+				"ghcr.io/acme": {"auth": "`+base64.StdEncoding.EncodeToString([]byte("u-acme:p-acme"))+`"},
+				"ghcr.io/acme/v1": {"auth": "`+base64.StdEncoding.EncodeToString([]byte("u-v1:p-v1"))+`"}
+			}
+		}`)
+
+		cred, ok := resolveConfiguredCredential(context.Background(), "ghcr.io", "acme/v1")
+		if !ok || cred.Username != "u-v1" || cred.Password != "p-v1" {
+			t.Errorf("acme/v1: got ok=%v cred=%+v, want u-v1:p-v1", ok, cred)
+		}
+		cred, ok = resolveConfiguredCredential(context.Background(), "ghcr.io", "acme")
+		if !ok || cred.Username != "u-acme" || cred.Password != "p-acme" {
+			t.Errorf("acme: got ok=%v cred=%+v, want u-acme:p-acme", ok, cred)
+		}
+	})
+
+	t.Run("legacy docker hub key resolves against index.docker.io", func(t *testing.T) {
+		dir := t.TempDir()
+		setTestHome(t, dir)
+		writeTestFile(t, dir, ".docker/config.json", `{
+			"auths": {"https://index.docker.io/v1/": {"auth": "`+base64.StdEncoding.EncodeToString([]byte("hub-user:hub-pass"))+`"}}
+		}`)
+
+		cred, ok := resolveConfiguredCredential(context.Background(), "index.docker.io", "org/app")
+		if !ok || cred.Username != "hub-user" || cred.Password != "hub-pass" {
+			t.Errorf("got ok=%v cred=%+v, want hub-user:hub-pass", ok, cred)
 		}
 	})
 }
@@ -412,7 +524,7 @@ func TestResolveCredentialsPrecedence(t *testing.T) {
 		}
 	`)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	writeTestFile(t, home, ".docker/config.json", `{
 		"auths": {"ghcr.io": {"auth": "`+base64.StdEncoding.EncodeToString([]byte("docker-user:docker-pass"))+`"}}
 	}`)
@@ -461,7 +573,7 @@ func TestResolveCredentialsPrecedence(t *testing.T) {
 	t.Run("anonymous when nothing configured", func(t *testing.T) {
 		t.Setenv("TF_CLI_CONFIG_FILE", "")
 		t.Setenv("TERRAFORM_CONFIG", "")
-		t.Setenv("HOME", t.TempDir()) // no docker config, no terraformrc
+		setTestHome(t, t.TempDir()) // no docker config, no terraformrc
 		fn, token, cred := resolveCredentials("registry.example.com", "some/repo", Config{})
 		if token != "" {
 			t.Errorf("token = %q, want empty", token)
@@ -472,6 +584,27 @@ func TestResolveCredentialsPrecedence(t *testing.T) {
 		}
 		if got != orasAuth.EmptyCredential || cred != orasAuth.EmptyCredential {
 			t.Errorf("cred = %+v resolved = %+v, want EmptyCredential", cred, got)
+		}
+	})
+
+	t.Run("uppercase GHCR.IO uses GHCR_TOKEN", func(t *testing.T) {
+		clearCredEnv(t)
+		setTestHome(t, t.TempDir()) // no docker config, no terraformrc
+		t.Setenv("TF_CLI_CONFIG_FILE", "")
+		t.Setenv("GHCR_TOKEN", "ghtok")
+		fn, token, _ := resolveCredentials("GHCR.IO", "org/app", Config{})
+		if token != "ghtok" {
+			t.Errorf("token = %q, want %q", token, "ghtok")
+		}
+		// GHCR tokens must be exchanged via basic auth, not sent as Bearer.
+		// The credential func is keyed by the normalized host — the host the
+		// HTTP client actually dials.
+		got, err := fn(context.Background(), "ghcr.io")
+		if err != nil {
+			t.Fatalf("credential func error: %v", err)
+		}
+		if got.Username == "" || got.Password != "ghtok" {
+			t.Errorf("cred = %+v, want basic auth with password ghtok", got)
 		}
 	})
 }
@@ -519,8 +652,7 @@ func TestAccessTokenFallbackFromResolvedCredential(t *testing.T) {
 	t.Run("resolveCredentials returns configured credential", func(t *testing.T) {
 		clearCredEnv(t)
 		dir := t.TempDir()
-		t.Setenv("HOME", dir)
-		t.Setenv("USERPROFILE", dir) // os.UserHomeDir() on Windows ignores HOME
+		setTestHome(t, dir) // os.UserHomeDir() resolves HOME or USERPROFILE
 		writeTestFile(t, dir, ".docker/config.json", `{
 			"auths": {"ghcr.io": {"auth": "`+base64.StdEncoding.EncodeToString([]byte("docker-user:docker-token"))+`"}}
 		}`)

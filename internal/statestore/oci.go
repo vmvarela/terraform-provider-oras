@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	fwss "github.com/hashicorp/terraform-plugin-framework/statestore"
 	ssschema "github.com/hashicorp/terraform-plugin-framework/statestore/schema"
@@ -28,13 +30,63 @@ type ProviderData struct {
 
 // Compile-time interface checks.
 var (
-	_ fwss.StateStore              = (*OCIStateStore)(nil)
-	_ fwss.StateStoreWithConfigure = (*OCIStateStore)(nil)
+	_ fwss.StateStore                   = (*OCIStateStore)(nil)
+	_ fwss.StateStoreWithConfigure      = (*OCIStateStore)(nil)
+	_ fwss.StateStoreWithValidateConfig = (*OCIStateStore)(nil)
 )
 
 // OCIStateStore implements fwss.StateStore using OCI registries via the ORAS protocol.
+//
+// Terraform creates a fresh OCIStateStore per RPC, so mutable state (the lock
+// registry) must NOT live on the struct: it travels via StateStoreData.
 type OCIStateStore struct {
+	// shared carries the *oras.Client and the lock registry created in
+	// Initialize and restored in Configure on every new instance.
+	shared *stateStoreData
+
+	// client is shorthand for shared.client, set by Configure.
 	client *oras.Client
+}
+
+// stateStoreData is the payload Initialize places in
+// InitializeResponse.StateStoreData and every per-RPC OCIStateStore instance
+// restores in Configure. It owns the lock registry so all instances of the
+// same store configuration share ownership tracking.
+type stateStoreData struct {
+	client *oras.Client
+
+	mu      sync.Mutex
+	lockIDs map[string]string // StateID → lock ID acquired by this configuration
+}
+
+// registerLock records a lock acquired under this store configuration.
+func (d *stateStoreData) registerLock(stateID, lockID string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.lockIDs == nil {
+		d.lockIDs = make(map[string]string)
+	}
+	d.lockIDs[stateID] = lockID
+}
+
+// lockFor returns the lock ID registered for stateID, if any.
+func (d *stateStoreData) lockFor(stateID string) (string, bool) {
+	// Read must hold the mutex: registerLock/forgetLockIf write concurrently
+	// (the framework may run RPCs in parallel).
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	lockID, ok := d.lockIDs[stateID]
+	return lockID, ok
+}
+
+// forgetLockIf removes the registration for stateID only if it still holds
+// lockID: a newer acquisition must survive a stale unlock.
+func (d *stateStoreData) forgetLockIf(stateID, lockID string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.lockIDs[stateID] == lockID {
+		delete(d.lockIDs, stateID)
+	}
 }
 
 // New returns a factory function for OCIStateStore, suitable for use in
@@ -90,6 +142,78 @@ func (s *OCIStateStore) Schema(_ context.Context, _ fwss.SchemaRequest, resp *fw
 	}
 }
 
+// validateStoreModel validates the known values of the state store model,
+// appending attribute diagnostics for invalid values. Unknown values are
+// skipped (Terraform cannot evaluate them yet); framework-level requiredness
+// (e.g. a null url) is left to the schema. It returns the parsed
+// registry/repository, empty when the URL is not a known valid value.
+// Shared by ValidateConfig (offline validation) and Initialize (defensive
+// re-check — ValidateConfig may not have run, e.g. for API clients).
+func validateStoreModel(cfg *storeModel, diags *diag.Diagnostics) (registry, repository string) {
+	if cfg.URL.IsNull() || cfg.URL.IsUnknown() {
+		return "", ""
+	}
+	registry, repository, err := parseOCIURL(cfg.URL.ValueString())
+	if err != nil {
+		diags.AddAttributeError(path.Root("url"), "Invalid OCI URL", err.Error())
+		return "", ""
+	}
+
+	if !cfg.LockTTL.IsNull() && !cfg.LockTTL.IsUnknown() {
+		ttl, parseErr := time.ParseDuration(cfg.LockTTL.ValueString())
+		switch {
+		case parseErr != nil:
+			diags.AddAttributeError(
+				path.Root("lock_ttl"),
+				"Invalid Lock TTL",
+				fmt.Sprintf("lock_ttl %q is not a valid duration; expected a Go duration string such as \"15m\" or \"1h\".", cfg.LockTTL.ValueString()),
+			)
+		case ttl < 0:
+			diags.AddAttributeError(
+				path.Root("lock_ttl"),
+				"Invalid Lock TTL",
+				fmt.Sprintf("lock_ttl %q is negative; use 0 to disable lock expiration or a positive duration such as \"15m\".", cfg.LockTTL.ValueString()),
+			)
+		}
+	}
+
+	if !cfg.MaxVersions.IsNull() && !cfg.MaxVersions.IsUnknown() {
+		if v := cfg.MaxVersions.ValueInt64(); v < 0 {
+			diags.AddAttributeError(
+				path.Root("max_versions"),
+				"Invalid Max Versions",
+				fmt.Sprintf("max_versions must be 0 (versioning disabled) or greater, got %d.", v),
+			)
+		}
+	}
+
+	if !cfg.MaxStateSize.IsNull() && !cfg.MaxStateSize.IsUnknown() {
+		if v := cfg.MaxStateSize.ValueInt64(); v < 0 {
+			diags.AddAttributeError(
+				path.Root("max_state_size"),
+				"Invalid Max State Size",
+				fmt.Sprintf("max_state_size must be 0 (keep the 256 MiB default) or greater, got %d bytes.", v),
+			)
+		}
+	}
+
+	return registry, repository
+}
+
+// ValidateConfig performs offline validation of the state_store block before
+// any network access: the URL must parse as oci://registry/repository,
+// lock_ttl must be a non-negative duration (0 disables expiration),
+// max_versions must be >= 0 (0 disables versioning) and max_state_size must
+// be >= 0 (0 keeps the 256 MiB default).
+func (s *OCIStateStore) ValidateConfig(ctx context.Context, req fwss.ValidateConfigRequest, resp *fwss.ValidateConfigResponse) {
+	var cfg storeModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &cfg)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	validateStoreModel(&cfg, &resp.Diagnostics)
+}
+
 // Initialize parses the configuration, creates the ORAS client, and stores it
 // in InitializeResponse.StateStoreData for later retrieval via Configure.
 //
@@ -106,9 +230,19 @@ func (s *OCIStateStore) Initialize(ctx context.Context, req fwss.InitializeReque
 		return
 	}
 
-	registry, repository, err := parseOCIURL(cfg.URL.ValueString())
-	if err != nil {
-		resp.Diagnostics.AddAttributeError(path.Root("url"), "Invalid OCI URL", err.Error())
+	// Defensive re-validation: identical rules as ValidateConfig, so
+	// Initialize never builds a client from values validation would reject.
+	registry, repository := validateStoreModel(&cfg, &resp.Diagnostics)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if registry == "" {
+		// URL is required; ValidateConfig normally catches this.
+		resp.Diagnostics.AddAttributeError(
+			path.Root("url"),
+			"Missing OCI URL",
+			"url must be set to an OCI URL in the format oci://registry/repository.",
+		)
 		return
 	}
 
@@ -127,16 +261,11 @@ func (s *OCIStateStore) Initialize(ctx context.Context, req fwss.InitializeReque
 	}
 
 	if !cfg.LockTTL.IsNull() && !cfg.LockTTL.IsUnknown() {
+		// Already validated; parse cannot fail here.
 		ttl, err := time.ParseDuration(cfg.LockTTL.ValueString())
-		if err != nil {
-			resp.Diagnostics.AddAttributeError(
-				path.Root("lock_ttl"),
-				"Invalid Lock TTL",
-				fmt.Sprintf("lock_ttl %q is not a valid duration; expected a Go duration string such as \"15m\" or \"1h\".", cfg.LockTTL.ValueString()),
-			)
-			return
+		if err == nil {
+			orasCfg.LockTTL = ttl
 		}
-		orasCfg.LockTTL = ttl
 	}
 
 	if !cfg.MaxVersions.IsNull() && !cfg.MaxVersions.IsUnknown() {
@@ -153,28 +282,36 @@ func (s *OCIStateStore) Initialize(ctx context.Context, req fwss.InitializeReque
 		return
 	}
 
-	resp.StateStoreData = client
+	// Wrap the client together with the shared lock registry: every per-RPC
+	// OCIStateStore instance restores this pointer in Configure.
+	resp.StateStoreData = &stateStoreData{client: client}
 }
 
 // ─── StateStoreWithConfigure ──────────────────────────────────────────────────
 
-// Configure stores the *oras.Client (set in Initialize) on the struct so that
-// Read/Write/Lock/Unlock/GetStates/DeleteState can use it.
+// Configure restores the shared state (client + lock registry) created in
+// Initialize onto this per-RPC instance.
 func (s *OCIStateStore) Configure(_ context.Context, req fwss.ConfigureRequest, resp *fwss.ConfigureResponse) {
 	if req.StateStoreData == nil {
+		// Silent: the framework calls Configure with nil data during offline
+		// validation, before ValidateConfig has produced anything.
 		return
 	}
 
-	client, ok := req.StateStoreData.(*oras.Client)
-	if !ok {
+	switch data := req.StateStoreData.(type) {
+	case *stateStoreData:
+		s.shared = data
+		s.client = data.client
+	case *oras.Client:
+		// Direct client (legacy path): wrap it in a per-instance registry.
+		s.shared = &stateStoreData{client: data}
+		s.client = data
+	default:
 		resp.Diagnostics.AddError(
 			"Unexpected StateStore data type",
-			fmt.Sprintf("Expected *oras.Client, got: %T. This is a provider bug.", req.StateStoreData),
+			fmt.Sprintf("Expected state store data from Initialize, got: %T. This is a provider bug.", req.StateStoreData),
 		)
-		return
 	}
-
-	s.client = client
 }
 
 // ─── State operations ─────────────────────────────────────────────────────────
@@ -191,7 +328,28 @@ func (s *OCIStateStore) Read(ctx context.Context, req fwss.ReadRequest, resp *fw
 }
 
 // Write stores the state bytes for the given StateID in the OCI registry.
+//
+// fwss.WriteRequest carries no LockID, so ownership is checked against locks
+// this instance acquired: if we hold a registered lock for the StateID, the
+// remote lock must still be ours (oras.Client.VerifyLock) before writing —
+// a lost lock means another client won, and we refuse to overwrite their
+// state. If we hold NO local lock (e.g. Terraform's explicit -lock=false
+// usage, where Lock is never called), the write proceeds unverified: this is
+// best-effort ownership checking, not enforcement. OCI tags have no CAS, so
+// even a passing check cannot close the verify→Put race.
 func (s *OCIStateStore) Write(ctx context.Context, req fwss.WriteRequest, resp *fwss.WriteResponse) {
+	localLockID, held := s.shared.lockFor(req.StateID)
+	if held {
+		if err := s.client.VerifyLock(ctx, req.StateID, localLockID); err != nil {
+			resp.Diagnostics.AddError(
+				"State lock no longer held",
+				fmt.Sprintf("Refusing to write state for workspace %q: the lock held by this operation is no longer valid (%v). Another client may have taken over; re-run the operation to acquire a fresh lock.",
+					req.StateID, err),
+			)
+			return
+		}
+	}
+
 	if err := s.client.Put(ctx, req.StateID, req.StateBytes); err != nil {
 		resp.Diagnostics.AddError("Failed to write state", err.Error())
 	}
@@ -248,14 +406,32 @@ func (s *OCIStateStore) Lock(ctx context.Context, req fwss.LockRequest, resp *fw
 		return
 	}
 
+	s.shared.registerLock(req.StateID, lockID)
 	resp.LockID = lockID
 }
 
 // Unlock releases a lock previously acquired by Lock.
 func (s *OCIStateStore) Unlock(ctx context.Context, req fwss.UnlockRequest, resp *fwss.UnlockResponse) {
+	// An empty LockID must never unlock: oras.Client.Unlock treats an empty
+	// ID as "any holder", so this would release someone else's lock.
+	if req.LockID == "" {
+		resp.Diagnostics.AddError(
+			"Missing lock ID",
+			fmt.Sprintf("Unlock for workspace %q was called with an empty lock ID; refusing to release the lock without verifying ownership. This may indicate the workspace was never locked or a provider bug.",
+				req.StateID),
+		)
+		return
+	}
+
 	if err := s.client.Unlock(ctx, req.StateID, req.LockID); err != nil {
 		resp.Diagnostics.AddError("Failed to release state lock", err.Error())
+		return
 	}
+
+	// Success: drop the registration only if it still matches the lock we
+	// just released — a newer acquisition under the same configuration must
+	// survive.
+	s.shared.forgetLockIf(req.StateID, req.LockID)
 }
 
 // ─── URL parsing ──────────────────────────────────────────────────────────────

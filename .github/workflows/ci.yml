@@ -35,18 +35,24 @@ jobs:
         run: go build ./...
 
       - name: Unit tests
+        if: matrix.os != 'ubuntu-latest'
         run: go test -race -count=1 ./...
 
-      - name: Unit tests with coverage
+      # Ubuntu runs the coverage gate instead of plain unit tests: the profile
+      # run includes the same tests, no need to execute them twice.
+      - name: Coverage gate
         if: matrix.os == 'ubuntu-latest'
-        run: go test -race -count=1 -coverprofile=coverage.out ./...
+        run: make coverage COVERAGE_THRESHOLD=80
 
       - name: Upload coverage profile
-        if: matrix.os == 'ubuntu-latest'
+        # Upload even when the coverage gate fails, so the profile is
+        # available for debugging the shortfall.
+        if: ${{ always() && matrix.os == 'ubuntu-latest' }}
         uses: actions/upload-artifact@v7
         with:
           name: coverage-ubuntu
           path: coverage.out
+          if-no-files-found: warn
 
   lint:
     name: Lint
