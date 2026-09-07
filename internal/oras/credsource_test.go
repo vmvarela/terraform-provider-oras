@@ -31,6 +31,15 @@ func clearCredEnv(t *testing.T) {
 	t.Setenv("USERPROFILE", tmpHome)
 }
 
+// setTestHome points HOME and USERPROFILE at dir so os.UserHomeDir() resolves
+// to it on both Unix and Windows. Setting only HOME leaks the real Windows
+// home into dockerConfigPaths().
+func setTestHome(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+}
+
 // writeTestFile writes content to dir/name and returns the full path.
 func writeTestFile(t *testing.T, dir, name, content string) string {
 	t.Helper()
@@ -230,7 +239,7 @@ func TestResolveConfiguredCredential_DockerConfig(t *testing.T) {
 
 	t.Run("empty auth skipped", func(t *testing.T) {
 		dir := t.TempDir()
-		t.Setenv("HOME", dir)
+		setTestHome(t, dir)
 		writeTestFile(t, dir, ".docker/config.json", `{
 			"auths": {"ghcr.io": {"auth": ""}}
 		}`)
@@ -248,7 +257,7 @@ func TestResolveConfiguredCredential_DockerConfig(t *testing.T) {
 
 	t.Run("credHelpers", func(t *testing.T) {
 		dir := t.TempDir()
-		t.Setenv("HOME", dir)
+		setTestHome(t, dir)
 		writeTestFile(t, dir, ".docker/config.json", `{
 			"credHelpers": {"ghcr.io": "testhelper"}
 		}`)
@@ -262,7 +271,7 @@ func TestResolveConfiguredCredential_DockerConfig(t *testing.T) {
 
 	t.Run("credsStore", func(t *testing.T) {
 		dir := t.TempDir()
-		t.Setenv("HOME", dir)
+		setTestHome(t, dir)
 		writeTestFile(t, dir, ".docker/config.json", `{"credsStore": "teststore"}`)
 		writeHelperScript(t, "docker-credential-teststore", `echo '{"ServerURL":"https://ghcr.io","Username":"su","Secret":"sp"}'`)
 
@@ -276,7 +285,7 @@ func TestResolveConfiguredCredential_DockerConfig(t *testing.T) {
 		dir := t.TempDir()
 		home := t.TempDir()
 		t.Setenv("XDG_CONFIG_HOME", dir)
-		t.Setenv("HOME", home)
+		setTestHome(t, home)
 		writeTestFile(t, dir, "containers/auth.json", `{
 			"auths": {"ghcr.io": {"auth": "`+base64.StdEncoding.EncodeToString([]byte("containers:ct"))+`"}}
 		}`)
@@ -294,7 +303,7 @@ func TestResolveConfiguredCredential_DockerConfig(t *testing.T) {
 		// Regression: both keys used to normalize to "ghcr.io/acme", so the
 		// map order decided which secret was returned for acme/v1.
 		dir := t.TempDir()
-		t.Setenv("HOME", dir)
+		setTestHome(t, dir)
 		writeTestFile(t, dir, ".docker/config.json", `{
 			"auths": {
 				"ghcr.io/acme": {"auth": "`+base64.StdEncoding.EncodeToString([]byte("u-acme:p-acme"))+`"},
@@ -314,7 +323,7 @@ func TestResolveConfiguredCredential_DockerConfig(t *testing.T) {
 
 	t.Run("legacy docker hub key resolves against index.docker.io", func(t *testing.T) {
 		dir := t.TempDir()
-		t.Setenv("HOME", dir)
+		setTestHome(t, dir)
 		writeTestFile(t, dir, ".docker/config.json", `{
 			"auths": {"https://index.docker.io/v1/": {"auth": "`+base64.StdEncoding.EncodeToString([]byte("hub-user:hub-pass"))+`"}}
 		}`)
@@ -515,7 +524,7 @@ func TestResolveCredentialsPrecedence(t *testing.T) {
 		}
 	`)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	writeTestFile(t, home, ".docker/config.json", `{
 		"auths": {"ghcr.io": {"auth": "`+base64.StdEncoding.EncodeToString([]byte("docker-user:docker-pass"))+`"}}
 	}`)
@@ -564,7 +573,7 @@ func TestResolveCredentialsPrecedence(t *testing.T) {
 	t.Run("anonymous when nothing configured", func(t *testing.T) {
 		t.Setenv("TF_CLI_CONFIG_FILE", "")
 		t.Setenv("TERRAFORM_CONFIG", "")
-		t.Setenv("HOME", t.TempDir()) // no docker config, no terraformrc
+		setTestHome(t, t.TempDir()) // no docker config, no terraformrc
 		fn, token, cred := resolveCredentials("registry.example.com", "some/repo", Config{})
 		if token != "" {
 			t.Errorf("token = %q, want empty", token)
@@ -580,7 +589,7 @@ func TestResolveCredentialsPrecedence(t *testing.T) {
 
 	t.Run("uppercase GHCR.IO uses GHCR_TOKEN", func(t *testing.T) {
 		clearCredEnv(t)
-		t.Setenv("HOME", t.TempDir()) // no docker config, no terraformrc
+		setTestHome(t, t.TempDir()) // no docker config, no terraformrc
 		t.Setenv("TF_CLI_CONFIG_FILE", "")
 		t.Setenv("GHCR_TOKEN", "ghtok")
 		fn, token, _ := resolveCredentials("GHCR.IO", "org/app", Config{})
@@ -643,8 +652,7 @@ func TestAccessTokenFallbackFromResolvedCredential(t *testing.T) {
 	t.Run("resolveCredentials returns configured credential", func(t *testing.T) {
 		clearCredEnv(t)
 		dir := t.TempDir()
-		t.Setenv("HOME", dir)
-		t.Setenv("USERPROFILE", dir) // os.UserHomeDir() on Windows ignores HOME
+		setTestHome(t, dir) // os.UserHomeDir() resolves HOME or USERPROFILE
 		writeTestFile(t, dir, ".docker/config.json", `{
 			"auths": {"ghcr.io": {"auth": "`+base64.StdEncoding.EncodeToString([]byte("docker-user:docker-token"))+`"}}
 		}`)
