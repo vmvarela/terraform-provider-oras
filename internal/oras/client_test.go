@@ -1217,6 +1217,86 @@ func TestRemoteClient_LockTTL_ClearsStaleLock_DeleteUnsupportedFallback(t *testi
 	_ = c.unlock(ctx, lockID2)
 }
 
+// ─── VerifyLock tests ─────────────────────────────────────────────────────────
+
+func TestClient_VerifyLock(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeORASRepo()
+	client := newTestClient(&orasRepositoryClient{inner: fake})
+	c := newRemoteClient(&orasRepositoryClient{inner: fake}, "default")
+
+	// No lock at all → error.
+	if err := client.VerifyLock(ctx, "default", "lock-1"); err == nil {
+		t.Fatal("expected VerifyLock to fail when no lock exists, got nil")
+	}
+
+	lockID, err := c.lock(ctx, &LockInfo{ID: "lock-1", Operation: "apply", Created: time.Now()})
+	if err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+
+	// Correct holder → ok.
+	if err := client.VerifyLock(ctx, "default", lockID); err != nil {
+		t.Fatalf("VerifyLock with correct holder: %v", err)
+	}
+
+	// Different holder → error.
+	if err := client.VerifyLock(ctx, "default", "someone-else"); err == nil {
+		t.Fatal("expected VerifyLock to fail for a different lock ID, got nil")
+	}
+
+	// Lock released → error.
+	if err := c.unlock(ctx, lockID); err != nil {
+		t.Fatalf("unlock: %v", err)
+	}
+	if err := client.VerifyLock(ctx, "default", lockID); err == nil {
+		t.Fatal("expected VerifyLock to fail after unlock, got nil")
+	}
+}
+
+func TestClient_VerifyLock_RivalHolder(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeORASRepo()
+	client := newTestClient(&orasRepositoryClient{inner: fake})
+	c := newRemoteClient(&orasRepositoryClient{inner: fake}, "default")
+
+	rivalDesc, _ := newRivalLockManifest(ctx, t, fake, "rival", 9)
+	if err := fake.Tag(ctx, rivalDesc, c.lockTag); err != nil {
+		t.Fatalf("tag rival lock: %v", err)
+	}
+
+	err := client.VerifyLock(ctx, "default", "mine")
+	if err == nil {
+		t.Fatal("expected VerifyLock to fail when the lock is held by a rival, got nil")
+	}
+	if !strings.Contains(err.Error(), "rival") {
+		t.Errorf("error = %v, want it to mention the actual holder", err)
+	}
+}
+
+func TestClient_VerifyLock_UnlockedMarker(t *testing.T) {
+	// After an unlock via retag-to-unlocked (delete-unsupported registry),
+	// the lock tag points at an empty marker: VerifyLock must fail.
+	ctx := context.Background()
+	fake := newFakeORASRepo()
+	deleteUnsup := &deleteUnsupportedRepo{delegatingRepo: delegatingRepo{inner: fake}}
+	repo := &orasRepositoryClient{inner: deleteUnsup, repository: "ghcr.io/test/repo"}
+	client := newTestClient(repo)
+	c := newRemoteClient(repo, "default")
+
+	lockID, err := c.lock(ctx, &LockInfo{ID: "lock-1", Operation: "apply", Created: time.Now()})
+	if err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+	if err := c.unlock(ctx, lockID); err != nil {
+		t.Fatalf("unlock: %v", err)
+	}
+
+	if err := client.VerifyLock(ctx, "default", lockID); err == nil {
+		t.Fatal("expected VerifyLock to fail after unlock via marker, got nil")
+	}
+}
+
 // ─── Lock race / generation detection tests ───────────────────────────────────
 
 func TestRemoteClient_Lock_RaceConditionDetection(t *testing.T) {

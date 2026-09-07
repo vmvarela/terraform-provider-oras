@@ -536,6 +536,42 @@ func (c *Client) Unlock(ctx context.Context, stateID, lockID string) error {
 	return wc.unlock(ctx, lockID)
 }
 
+// VerifyLock reports whether the lock for stateID is still held by lockID: it
+// reads the lock tag and compares the lock holder ID. It returns an error when
+// the lock is gone, held by a different holder, or the check itself fails.
+// There is no CAS on OCI tags, so a caller cannot close the race between a
+// successful VerifyLock and a subsequent Put — this is a best-effort
+// ownership check.
+func (c *Client) VerifyLock(ctx context.Context, stateID, lockID string) error {
+	ctx, cancel := c.opContext(ctx)
+	defer cancel()
+	wc := newWorkspaceClient(c, stateID)
+	return wc.verifyLock(ctx, lockID)
+}
+
+func (wc *workspaceClient) verifyLock(ctx context.Context, lockID string) error {
+	fm, _, err := wc.fetchManifestWithDesc(ctx, wc.lockTag)
+	if err != nil {
+		if isNotFound(err) {
+			return fmt.Errorf("lock for %q no longer exists", wc.lockTag)
+		}
+		return fmt.Errorf("failed to verify lock: %w", err)
+	}
+	existing, err := parseLockInfo(&fm, wc.stateTag)
+	if err != nil {
+		return fmt.Errorf("failed to verify lock: %w", err)
+	}
+	if existing == nil || existing.ID == "" {
+		// Includes the "unlocked-" marker case: the tag points at a
+		// manifest with no holder.
+		return fmt.Errorf("lock for %q no longer exists", wc.lockTag)
+	}
+	if existing.ID != lockID {
+		return fmt.Errorf("lock for %q is held by %q, not %q", wc.lockTag, existing.ID, lockID)
+	}
+	return nil
+}
+
 func (wc *workspaceClient) unlock(ctx context.Context, id string) error {
 	fm, desc, err := wc.fetchManifestWithDesc(ctx, wc.lockTag)
 	if err != nil {
