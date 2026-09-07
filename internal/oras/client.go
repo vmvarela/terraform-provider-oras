@@ -1170,7 +1170,7 @@ func compressGzip(data []byte) ([]byte, error) {
 
 // ─── Retry helpers ────────────────────────────────────────────────────────────
 //
-// Retry runs operation up to 3 times with exponential backoff (1s, 2s, 4s),
+// Retry runs operation up to 3 times with exponential backoff (1s, 2s),
 // retrying only on transient errors.
 func retry(ctx context.Context, operation func(context.Context) error) error {
 	_, err := retryWithResult(ctx, func(ctx context.Context) (struct{}, error) {

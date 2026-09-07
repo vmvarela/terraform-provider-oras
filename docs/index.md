@@ -24,8 +24,11 @@ No resources, no data sources. The provider exists solely to expose the `oras_oc
 terraform {
   required_providers {
     oras = {
-      source  = "registry.terraform.io/vmvarela/oras"
-      version = "~> 0.1"
+      source = "registry.terraform.io/vmvarela/oras"
+      # Pin the exact stable version. Pre-release versions (e.g. 0.1.6-alpha)
+      # additionally require an exact pin: Terraform's range operators (~>, >=, …)
+      # never select pre-releases.
+      version = "0.1.5"
     }
   }
 
@@ -110,7 +113,13 @@ Workspace names that aren't valid OCI tags are hashed to `ws-<hash>`, with the o
 
 ## Locking
 
-Generation-based optimistic concurrency. Each `Lock` writes a lock manifest with an incremented generation counter, then re-reads it to confirm it won the race. Stale locks expire via `lock_ttl`, checked during acquisition — there are no background goroutines.
+Best-effort, generation-based optimistic concurrency. Each `Lock` writes a lock manifest with an incremented generation counter and a holder ID, then re-reads the lock tag — after a short, context-cancellable wait — to confirm it still won the race. This second read catches a rival that tagged the lock after the first verification; when ownership has moved, `Lock` reports contention instead of clearing a tag that points at someone else. Releasing a lock (or retagging it to the `unlocked-` marker on registries without manifest deletion) re-checks the tag right before overwriting it.
+
+OCI tags are last-writer-wins: the OCI Distribution spec has no portable compare-and-swap (no `If-Match` across registries). These checks narrow the race window but cannot close it entirely — **do not treat this as strong mutual exclusion**. For most teams the practical protection is that Terraform operations are human-paced and lock acquisition is verified before every write.
+
+`lock_ttl` recovers orphaned locks: a lock whose lease has expired is cleared on the next `Lock` attempt (no background goroutines). Unset means locks never expire, and a crashed client blocks the workspace until someone releases it.
+
+Running Terraform with `-lock=false` never calls `Lock`, so no lock is registered and writes proceed without the ownership verification described above.
 
 ## Version Retention
 

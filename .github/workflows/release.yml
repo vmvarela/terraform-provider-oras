@@ -22,12 +22,45 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Preflight — check signing key is configured
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          # Fail BEFORE importing: GoReleaser's OSS 'signs' step has no
+          # 'if' support, so publishing without the key would produce an
+          # invalid (unsigned) Terraform Registry release. Do not make
+          # signing optional — fix the secret instead.
+          if [ -z "$GPG_PRIVATE_KEY" ]; then
+            echo "::error::GPG_PRIVATE_KEY secret is not configured on this repository."
+            echo "::error::Releases for the Terraform Registry must be signed (see .goreleaser.yml 'signs')."
+            echo "::error::Add the armored GPG private key as the GPG_PRIVATE_KEY repository secret, then re-push the tag."
+            exit 1
+          fi
+          echo "GPG_PRIVATE_KEY is configured"
+
       - name: Import GPG key
         id: import_gpg
         uses: crazy-max/ghaction-import-gpg@v7
         with:
           gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
           passphrase: ${{ secrets.PASSPHRASE }}
+
+      - name: Verify GPG import
+        env:
+          GPG_FINGERPRINT: ${{ steps.import_gpg.outputs.fingerprint }}
+        run: |
+          if [ -z "$GPG_FINGERPRINT" ]; then
+            echo "::error::GPG import produced no fingerprint."
+            echo "::error::Check that GPG_PRIVATE_KEY contains the full armored private key block (-----BEGIN PGP PRIVATE KEY BLOCK-----)."
+            exit 1
+          fi
+          # Exit-code check only; prints nothing from the keyring — logs must
+          # never contain key material or passphrases.
+          if ! gpg --batch --list-secret-keys "$GPG_FINGERPRINT" >/dev/null 2>&1; then
+            echo "::error::fingerprint $GPG_FINGERPRINT not found in the keyring; verify the GPG_PRIVATE_KEY secret."
+            exit 1
+          fi
+          echo "Signing key imported: ${GPG_FINGERPRINT:0:16}…"
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
