@@ -65,6 +65,12 @@ const maxManifestSize int64 = 1 << 20
 // noticeable latency to lock acquisition.
 const lockStabilityDelay = 100 * time.Millisecond
 
+// lockCleanupTimeout bounds the lock-tag cleanup that runs with a context
+// detached from the caller's: by the time cleanup runs, the caller's context
+// may already be cancelled (stability window expired, verification failed),
+// and a cancelled context would make the cleanup itself fail.
+const lockCleanupTimeout = 30 * time.Second
+
 // Tag naming scheme:
 //   - State is stored at "state-<workspaceTag>".
 //   - State versions are stored at "stver-<workspaceTag>-v<N>".
@@ -463,16 +469,23 @@ func (wc *workspaceClient) lock(ctx context.Context, info *LockInfo) (string, er
 	// parsing can fail: content addressing guarantees our own digest fetches
 	// back our own bytes.
 	cleanupOurTag := func() {
-		d, err := wc.client.repoClient.inner.Resolve(ctx, wc.lockTag)
+		// Detached, bounded context: the caller's ctx may already be
+		// cancelled at every cleanup call site (the stability-window branch
+		// literally runs on a cancelled context), and cleanup on a cancelled
+		// context is a no-op that strands the lock until TTL expiry. The
+		// digest check below still guards against clearing a rival's tag.
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), lockCleanupTimeout)
+		defer cancel()
+		d, err := wc.client.repoClient.inner.Resolve(cleanupCtx, wc.lockTag)
 		if err != nil || d.Digest != manifestDesc.Digest {
 			return
 		}
-		if err := wc.client.repoClient.inner.Delete(ctx, d); err != nil && isDeleteUnsupported(err) {
+		if err := wc.client.repoClient.inner.Delete(cleanupCtx, d); err != nil && isDeleteUnsupported(err) {
 			// Registries like GHCR (HTTP 405) can't delete manifests;
 			// retag to "unlocked-" so the workspace isn't locked until
 			// TTL expiry. The tag still points at our digest (checked
 			// above), so that is the expected digest for the preflight.
-			if retagErr := wc.retagToUnlocked(ctx, manifestDesc.Digest.String()); retagErr != nil {
+			if retagErr := wc.retagToUnlocked(cleanupCtx, manifestDesc.Digest.String()); retagErr != nil {
 				slog.Debug("failed to retag lock to unlocked after failed verification", "error", retagErr)
 			}
 		}
@@ -787,6 +800,14 @@ func (wc *workspaceClient) groupVersionsByDigest(ctx context.Context, versions [
 		g.Go(func() error {
 			desc, err := wc.client.repoClient.inner.Resolve(ctx, tag)
 			if err != nil {
+				if isNotFound(err) {
+					// A concurrent retention (or unlock) may have deleted
+					// this tag between the Tags listing and this Resolve:
+					// nothing left to group, skip it. Any other failure —
+					// auth, network, 5xx — must propagate with tag context
+					// or retention would silently stay incomplete.
+					return nil
+				}
 				// Propagate with tag context: a failed Resolve silently
 				// skipped would leave that version's tags undeletable and
 				// retention perpetually incomplete. The current digest skip

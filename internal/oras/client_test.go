@@ -215,6 +215,32 @@ func (r *sameGenRaceRepo) Tag(ctx context.Context, desc ocispec.Descriptor, refe
 	return nil
 }
 
+// tagCancelRepo cancels the caller's context right after a successful Tag of
+// lockTag, making everything downstream of the lock Tag run on a cancelled
+// context — deterministically, with no sleeps or timers. With
+// deleteUnsupported it also answers Delete with HTTP 405.
+type tagCancelRepo struct {
+	delegatingRepo
+	cancel            context.CancelFunc
+	lockTag           string
+	deleteUnsupported bool
+}
+
+func (r *tagCancelRepo) Tag(ctx context.Context, desc ocispec.Descriptor, reference string) error {
+	err := r.delegatingRepo.Tag(ctx, desc, reference)
+	if err == nil && reference == r.lockTag {
+		r.cancel()
+	}
+	return err
+}
+
+func (r *tagCancelRepo) Delete(ctx context.Context, target ocispec.Descriptor) error {
+	if r.deleteUnsupported {
+		return &orasErrcode.ErrorResponse{StatusCode: http.StatusMethodNotAllowed}
+	}
+	return r.delegatingRepo.Delete(ctx, target)
+}
+
 // blockingRepo blocks all operations until the context is cancelled.
 type blockingRepo struct {
 	delegatingRepo
@@ -1297,6 +1323,80 @@ func TestClient_VerifyLock_UnlockedMarker(t *testing.T) {
 	}
 }
 
+// ─── Lock cleanup on cancelled context tests ─────────────────────────────────
+
+// TestLock_CleanupRunsOnCancelledContext: when the caller's context is
+// cancelled right after the lock Tag (deterministically via the tagCancelRepo
+// double), the post-failure cleanup must still run on a detached context —
+// otherwise the freshly published lock tag is stranded until TTL expiry.
+func TestLock_CleanupRunsOnCancelledContext(t *testing.T) {
+	newInfo := func() *LockInfo {
+		return &LockInfo{ID: "me", Operation: "apply", Created: time.Now()}
+	}
+
+	t.Run("delete supported clears the lock tag", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		fake := newFakeORASRepo()
+		cancelRepo := &tagCancelRepo{delegatingRepo: delegatingRepo{inner: fake}, cancel: cancel}
+		repo := &orasRepositoryClient{inner: cancelRepo}
+		c := newRemoteClient(repo, "default")
+		cancelRepo.lockTag = c.lockTag
+
+		_, err := c.lock(ctx, newInfo())
+		if err == nil {
+			t.Fatal("expected lock to fail after cancellation, got nil")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("error = %v, want it to wrap context.Canceled", err)
+		}
+		// The original error must be returned unchanged by the cleanup path.
+		if !strings.Contains(err.Error(), "failed to verify lock acquisition") {
+			t.Errorf("error = %v, want the verification failure message", err)
+		}
+		// Cleanup ran despite the cancelled caller context: the tag is gone.
+		if _, rerr := fake.Resolve(context.Background(), c.lockTag); !errors.Is(rerr, errdef.ErrNotFound) {
+			t.Errorf("lock tag still resolves (%v), cleanup did not run on cancelled context", rerr)
+		}
+	})
+
+	t.Run("delete unsupported retags to unlocked marker", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		fake := newFakeORASRepo()
+		cancelRepo := &tagCancelRepo{
+			delegatingRepo:    delegatingRepo{inner: fake},
+			cancel:            cancel,
+			deleteUnsupported: true,
+		}
+		repo := &orasRepositoryClient{inner: cancelRepo, repository: "ghcr.io/test/repo"}
+		c := newRemoteClient(repo, "default")
+		cancelRepo.lockTag = c.lockTag
+
+		_, err := c.lock(ctx, newInfo())
+		if err == nil {
+			t.Fatal("expected lock to fail after cancellation, got nil")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("error = %v, want it to wrap context.Canceled", err)
+		}
+		// Delete is unsupported (405), so cleanup must have fallen back to
+		// the unlocked marker — again on the detached context. The lock tag
+		// now points at a holderless manifest.
+		fm, _, ferr := c.fetchManifestWithDesc(context.Background(), c.lockTag)
+		if ferr != nil {
+			t.Fatalf("fetch lock tag after failed lock: %v", ferr)
+		}
+		parsed, perr := parseLockInfo(&fm, c.stateTag)
+		if perr != nil {
+			t.Fatalf("parse lock info: %v", perr)
+		}
+		if parsed != nil && parsed.ID != "" {
+			t.Errorf("lock tag still held by %q after cleanup on cancelled context", parsed.ID)
+		}
+	})
+}
+
 // ─── Lock race / generation detection tests ───────────────────────────────────
 
 func TestRemoteClient_Lock_RaceConditionDetection(t *testing.T) {
@@ -1546,6 +1646,83 @@ func TestDelete_PropagatesCallerDeadline(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Errorf("Delete took %v, caller deadline was not respected", elapsed)
+	}
+}
+
+// tagMissingRepo makes Resolve report the given not-found error for
+// missingTag only, delegating everything else.
+type tagMissingRepo struct {
+	delegatingRepo
+	missingTag string
+	notFound   error
+}
+
+func (r *tagMissingRepo) Resolve(ctx context.Context, reference string) (ocispec.Descriptor, error) {
+	if reference == r.missingTag {
+		return ocispec.Descriptor{}, r.notFound
+	}
+	return r.delegatingRepo.Resolve(ctx, reference)
+}
+
+// TestGroupVersionsByDigest_ToleratesConcurrentTagDeletion: a tag may vanish
+// between the Tags listing and per-tag Resolve (another retention running
+// concurrently). A 404 for a single tag must be skipped, not fail the whole
+// grouping; other tags are still grouped. Non-404 errors keep propagating
+// (TestGroupVersionsByDigest_PropagatesResolveError).
+func TestGroupVersionsByDigest_ToleratesConcurrentTagDeletion(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		notFound error
+	}{
+		{name: "errdef.ErrNotFound", notFound: errdef.ErrNotFound},
+		{name: "404 ErrorResponse", notFound: &orasErrcode.ErrorResponse{StatusCode: http.StatusNotFound}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			fake := newFakeORASRepo()
+
+			for i, data := range []string{"v1-data", "v2-data"} {
+				desc := ocispec.Descriptor{
+					MediaType: ocispec.MediaTypeImageManifest,
+					Digest:    digest.FromBytes([]byte(data)),
+					Size:      int64(len(data)),
+				}
+				if err := fake.Push(ctx, desc, bytes.NewReader([]byte(data))); err != nil {
+					t.Fatalf("push v%d: %v", i+1, err)
+				}
+				repo := &orasRepositoryClient{inner: fake}
+				c := newRemoteClient(repo, "default")
+				if err := fake.Tag(ctx, desc, c.versionTagFor(i+1)); err != nil {
+					t.Fatalf("tag v%d: %v", i+1, err)
+				}
+			}
+
+			missingRepo := &tagMissingRepo{
+				delegatingRepo: delegatingRepo{inner: fake},
+				missingTag:     stateVersionTagPrefix + workspaceTagFor("default") + stateVersionTagSeparator + "2",
+				notFound:       tc.notFound,
+			}
+			c := newRemoteClient(&orasRepositoryClient{inner: missingRepo}, "default")
+
+			groups, err := c.groupVersionsByDigest(ctx, []int{1, 2}, "sha256:"+strings.Repeat("0", 64))
+			if err != nil {
+				t.Fatalf("groupVersionsByDigest: %v", err)
+			}
+
+			// v1 is still grouped; v2 (404) is skipped without failing.
+			found := map[string]bool{}
+			for _, g := range groups {
+				for _, tag := range g.tags {
+					found[tag] = true
+				}
+			}
+			if !found[c.versionTagFor(1)] {
+				t.Errorf("expected %q to be grouped, groups = %+v", c.versionTagFor(1), groups)
+			}
+			if found[c.versionTagFor(2)] {
+				t.Errorf("expected vanished tag %q to be skipped, groups = %+v", c.versionTagFor(2), groups)
+			}
+		})
 	}
 }
 

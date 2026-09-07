@@ -69,6 +69,13 @@ func TestNormalizeRegistryHost(t *testing.T) {
 		{"http://ghcr.io", "ghcr.io"},
 		{"https://index.docker.io/v1/", "index.docker.io"},
 		{"https://index.docker.io/v1", "index.docker.io"},
+		{"index.docker.io/v1/", "index.docker.io"},
+		{"https://INDEX.DOCKER.IO/v1/", "index.docker.io"},
+		// Repository-scoped "/v1" segments must survive: stripping them
+		// would make "ghcr.io/acme/v1" collide with "ghcr.io/acme".
+		{"ghcr.io/acme/v1", "ghcr.io/acme/v1"},
+		{"ghcr.io/acme/v1/", "ghcr.io/acme/v1"},
+		{"https://ghcr.io/acme/v1", "ghcr.io/acme/v1"},
 		{"registry.example.com:5000", "registry.example.com:5000"},
 		{"http://Registry.Example.com:5000", "registry.example.com:5000"},
 		{"ghcr.io/", "ghcr.io"},
@@ -125,6 +132,18 @@ func TestConfigKeyMatch(t *testing.T) {
 		}
 		if got := configKeyMatch("https://index.docker.io/v1/", "index.docker.io", ""); got != 2 {
 			t.Errorf("docker hub legacy key vs empty path = %d, want 2", got)
+		}
+	})
+
+	t.Run("repository /v1 segment does not collapse onto shorter key", func(t *testing.T) {
+		// Regression: normalizeRegistryHost used to strip "/v1" from any key,
+		// so "ghcr.io/acme/v1" matched as "ghcr.io/acme" and could win the
+		// same specificity as (or tie with) the genuinely shorter key.
+		if got := configKeyMatch("ghcr.io/acme/v1", "ghcr.io", "acme/v1"); got != 4 {
+			t.Errorf("configKeyMatch(ghcr.io/acme/v1) = %d, want 4 (two path segments)", got)
+		}
+		if got := configKeyMatch("ghcr.io/acme/v1", "ghcr.io", "acme/other"); got != 0 {
+			t.Errorf("configKeyMatch(ghcr.io/acme/v1 vs acme/other) = %d, want 0", got)
 		}
 	})
 
@@ -268,6 +287,41 @@ func TestResolveConfiguredCredential_DockerConfig(t *testing.T) {
 		cred, ok := resolveConfiguredCredential(context.Background(), "ghcr.io", "org/app")
 		if !ok || cred.Username != "containers" {
 			t.Errorf("got ok=%v cred=%+v, want containers (first source wins on tie)", ok, cred)
+		}
+	})
+
+	t.Run("ghcr.io/acme and ghcr.io/acme/v1 keep distinct credentials", func(t *testing.T) {
+		// Regression: both keys used to normalize to "ghcr.io/acme", so the
+		// map order decided which secret was returned for acme/v1.
+		dir := t.TempDir()
+		t.Setenv("HOME", dir)
+		writeTestFile(t, dir, ".docker/config.json", `{
+			"auths": {
+				"ghcr.io/acme": {"auth": "`+base64.StdEncoding.EncodeToString([]byte("u-acme:p-acme"))+`"},
+				"ghcr.io/acme/v1": {"auth": "`+base64.StdEncoding.EncodeToString([]byte("u-v1:p-v1"))+`"}
+			}
+		}`)
+
+		cred, ok := resolveConfiguredCredential(context.Background(), "ghcr.io", "acme/v1")
+		if !ok || cred.Username != "u-v1" || cred.Password != "p-v1" {
+			t.Errorf("acme/v1: got ok=%v cred=%+v, want u-v1:p-v1", ok, cred)
+		}
+		cred, ok = resolveConfiguredCredential(context.Background(), "ghcr.io", "acme")
+		if !ok || cred.Username != "u-acme" || cred.Password != "p-acme" {
+			t.Errorf("acme: got ok=%v cred=%+v, want u-acme:p-acme", ok, cred)
+		}
+	})
+
+	t.Run("legacy docker hub key resolves against index.docker.io", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Setenv("HOME", dir)
+		writeTestFile(t, dir, ".docker/config.json", `{
+			"auths": {"https://index.docker.io/v1/": {"auth": "`+base64.StdEncoding.EncodeToString([]byte("hub-user:hub-pass"))+`"}}
+		}`)
+
+		cred, ok := resolveConfiguredCredential(context.Background(), "index.docker.io", "org/app")
+		if !ok || cred.Username != "hub-user" || cred.Password != "hub-pass" {
+			t.Errorf("got ok=%v cred=%+v, want hub-user:hub-pass", ok, cred)
 		}
 	})
 }

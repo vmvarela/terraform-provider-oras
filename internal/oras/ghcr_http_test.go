@@ -8,6 +8,7 @@ package oras
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // recordedRequest is a captured incoming request.
@@ -469,6 +471,145 @@ func TestFindVersionIDWithTag(t *testing.T) {
 				t.Errorf("findVersionIDWithTag = %d, want %d", got, tt.want)
 			}
 		})
+	}
+}
+
+// setGHCRDeleteRetryDelay shrinks the DELETE retry backoff for the test and
+// restores it on cleanup.
+func setGHCRDeleteRetryDelay(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := ghcrDeleteRetryDelay
+	ghcrDeleteRetryDelay = d
+	t.Cleanup(func() { ghcrDeleteRetryDelay = old })
+}
+
+// serveVersionsAnd404Deletes answers GET .../versions with body on page 1 and
+// every DELETE with 404, counting DELETEs.
+func serveVersionsAnd404Deletes(t *testing.T, body string) (*httptest.Server, func() int) {
+	t.Helper()
+	var mu sync.Mutex
+	dels := 0
+	srv, _ := newGHCRAPITestServer(t, func(w http.ResponseWriter, r recordedRequest) {
+		if r.Method == http.MethodGet {
+			fmt.Fprint(w, body) //nolint:errcheck // test response write
+			return
+		}
+		mu.Lock()
+		dels++
+		mu.Unlock()
+		w.WriteHeader(http.StatusNotFound)
+	})
+	return srv, func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return dels
+	}
+}
+
+// TestDeleteGitHubPackageVersionByTag_Delete404Transient: a DELETE 404 that
+// clears on a later attempt succeeds — ghcr.io sometimes 404s the DELETE of a
+// version it just listed (eventual propagation).
+func TestDeleteGitHubPackageVersionByTag_Delete404Transient(t *testing.T) {
+	setGHCRDeleteRetryDelay(t, time.Millisecond)
+	var dels int
+	srv, _ := newGHCRAPITestServer(t, func(w http.ResponseWriter, r recordedRequest) {
+		if r.Method == http.MethodGet {
+			fmt.Fprint(w, ghcrVersionsBody(map[int64][]string{42: {"state-default"}}, testDigest)) //nolint:errcheck // test response write
+			return
+		}
+		dels++
+		if dels == 1 {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	if err := deleteGitHubPackageVersionByTag(context.Background(), srv.Client(), srv.URL, "myorg", "myrepo", "state-default", "tok", testDigest); err != nil {
+		t.Fatalf("expected transient 404 to be retried to success, got %v", err)
+	}
+	if dels != 2 {
+		t.Errorf("DELETEs = %d, want 2 (first 404, retry 204)", dels)
+	}
+}
+
+// TestDeleteGitHubPackageVersionByTag_Delete404Persistent: a 404 that never
+// clears surfaces as the original error after the bounded attempts, on both
+// the org and the user endpoint (fallback untouched).
+func TestDeleteGitHubPackageVersionByTag_Delete404Persistent(t *testing.T) {
+	setGHCRDeleteRetryDelay(t, time.Millisecond)
+	srv, dels := serveVersionsAnd404Deletes(t,
+		ghcrVersionsBody(map[int64][]string{42: {"state-default"}}, testDigest))
+
+	err := deleteGitHubPackageVersionByTag(context.Background(), srv.Client(), srv.URL, "myorg", "myrepo", "state-default", "tok", testDigest)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !isHTTPStatus(err, http.StatusNotFound) {
+		t.Errorf("error = %v, want httpStatusErr 404", err)
+	}
+	// ghcrDeleteMaxAttempts per endpoint: org then user fallback.
+	if n := dels(); n != 2*ghcrDeleteMaxAttempts {
+		t.Errorf("DELETEs = %d, want %d (%d per endpoint)", n, 2*ghcrDeleteMaxAttempts, ghcrDeleteMaxAttempts)
+	}
+}
+
+// TestDeleteGitHubPackageVersionByTag_DeleteNon404NotRetried: statuses other
+// than 404 (e.g. 403 permission failure) are returned as-is with no retries.
+func TestDeleteGitHubPackageVersionByTag_DeleteNon404NotRetried(t *testing.T) {
+	setGHCRDeleteRetryDelay(t, time.Millisecond)
+	var dels int
+	srv, _ := newGHCRAPITestServer(t, func(w http.ResponseWriter, r recordedRequest) {
+		if r.Method == http.MethodGet {
+			fmt.Fprint(w, ghcrVersionsBody(map[int64][]string{42: {"state-default"}}, testDigest)) //nolint:errcheck // test response write
+			return
+		}
+		dels++
+		w.WriteHeader(http.StatusForbidden)
+	})
+
+	err := deleteGitHubPackageVersionByTag(context.Background(), srv.Client(), srv.URL, "myorg", "myrepo", "state-default", "tok", testDigest)
+	if !isHTTPStatus(err, http.StatusForbidden) {
+		t.Fatalf("error = %v, want httpStatusErr 403", err)
+	}
+	// Single DELETE: no retries and no user-endpoint fallback.
+	if dels != 1 {
+		t.Errorf("DELETEs = %d, want 1 (org DELETE; no retry/fallback)", dels)
+	}
+}
+
+// TestDeleteGitHubPackageVersionByTag_Delete404CancelledDuringBackoff: the
+// first DELETE 404s and the context is cancelled while waiting out the (very
+// long) backoff — the retry must abort with the context error instead of
+// retrying or falling back to the user endpoint.
+func TestDeleteGitHubPackageVersionByTag_Delete404CancelledDuringBackoff(t *testing.T) {
+	setGHCRDeleteRetryDelay(t, time.Hour)
+	first404 := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-first404
+		cancel()
+	}()
+
+	srv, reqs := newGHCRAPITestServer(t, func(w http.ResponseWriter, r recordedRequest) {
+		if r.Method == http.MethodGet {
+			fmt.Fprint(w, ghcrVersionsBody(map[int64][]string{42: {"state-default"}}, testDigest)) //nolint:errcheck // test response write
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		first404 <- struct{}{}
+	})
+
+	err := deleteGitHubPackageVersionByTag(ctx, srv.Client(), srv.URL, "myorg", "myrepo", "state-default", "tok", testDigest)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	// No user-endpoint fallback after cancellation.
+	for _, r := range reqs() {
+		if !strings.HasPrefix(r.Path, "/orgs/") {
+			t.Errorf("request %s %s reached the user endpoint after cancellation", r.Method, r.Path)
+		}
 	}
 }
 

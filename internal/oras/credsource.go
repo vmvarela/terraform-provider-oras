@@ -40,18 +40,24 @@ type cliConfig struct {
 }
 
 // normalizeRegistryHost canonicalizes registry hosts from Docker-style config
-// keys and user config: strips a leading http:// or https:// scheme, the
-// legacy Docker Hub suffix "/v1/" (as in "https://index.docker.io/v1/"), any
+// keys and user config: strips a leading http:// or https:// scheme, any
 // trailing slash, and lowercases the result (hosts compare
-// case-insensitively, e.g. "GHCR.IO" must resolve like "ghcr.io").
+// case-insensitively, e.g. "GHCR.IO" must resolve like "ghcr.io"). The only
+// "/v1" suffix removed is the legacy Docker Hub endpoint form
+// "index.docker.io/v1"; stripping "/v1" from other keys would collapse
+// repository-scoped keys like "ghcr.io/acme/v1" onto "ghcr.io/acme" and could
+// select the wrong credential.
 func normalizeRegistryHost(s string) string {
 	s = strings.TrimSpace(s)
 	s = strings.TrimPrefix(s, "https://")
 	s = strings.TrimPrefix(s, "http://")
-	s = strings.TrimSuffix(s, "/v1/")
-	s = strings.TrimSuffix(s, "/v1")
 	s = strings.TrimSuffix(s, "/")
-	return strings.ToLower(s)
+	s = strings.ToLower(s)
+	if s == "index.docker.io/v1" {
+		// Legacy Docker Hub v1 endpoint key written by older Docker clients.
+		s = "index.docker.io"
+	}
+	return s
 }
 
 // parseConfigKey splits a config key ("ghcr.io", "ghcr.io/org", "") into

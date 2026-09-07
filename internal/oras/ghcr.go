@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var errNotGHCR = errors.New("not a ghcr.io repository")
@@ -25,7 +26,18 @@ const (
 	githubAPIBaseURL      = "https://api.github.com"
 	githubAPIVersion      = "2022-11-28"
 	githubVersionsPerPage = 100
+
+	// ghcrDeleteMaxAttempts caps retries of the package-version DELETE when
+	// GitHub returns 404. A version freshly published to ghcr.io is sometimes
+	// listed but not yet deletable (eventual propagation on the Packages
+	// backend), so a short bounded retry recovers without masking real
+	// permission failures (401/403 are returned as-is, never retried).
+	ghcrDeleteMaxAttempts = 3
 )
+
+// ghcrDeleteRetryDelay is the backoff between retried DELETE attempts. A var
+// so tests can shrink it and stay fast and deterministic.
+var ghcrDeleteRetryDelay = 500 * time.Millisecond
 
 type githubPackageVersion struct {
 	ID       int64  `json:"id"`
@@ -109,7 +121,34 @@ func deleteFromGitHubPackagesEndpoint(ctx context.Context, client *http.Client, 
 	}
 
 	deleteURL := fmt.Sprintf("%s/versions/%d", baseURL, versionID)
-	return githubRequest(ctx, client, http.MethodDelete, deleteURL, token, "delete package version", http.StatusNoContent, nil)
+	return deleteGitHubPackageVersionWithRetry(ctx, client, deleteURL, token)
+}
+
+// deleteGitHubPackageVersionWithRetry issues the package-version DELETE and,
+// only when GitHub answers 404, retries it up to ghcrDeleteMaxAttempts with a
+// short backoff — the freshly-published-version propagation window described
+// in the ghcrDeleteMaxAttempts comment. Any other status is returned as-is,
+// and a 404 that persists across all attempts returns the original error so
+// permission problems stay visible. Cancellation aborts the backoff
+// immediately with the context error.
+func deleteGitHubPackageVersionWithRetry(ctx context.Context, client *http.Client, deleteURL, token string) error {
+	var lastErr error
+	for attempt := 1; attempt <= ghcrDeleteMaxAttempts; attempt++ {
+		err := githubRequest(ctx, client, http.MethodDelete, deleteURL, token, "delete package version", http.StatusNoContent, nil)
+		if err == nil || !isHTTPStatus(err, http.StatusNotFound) {
+			return err
+		}
+		lastErr = err
+		if attempt == ghcrDeleteMaxAttempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(ghcrDeleteRetryDelay):
+		}
+	}
+	return lastErr
 }
 
 // findGitHubVersionIDByTag pages through the package's versions looking for a
