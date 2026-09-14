@@ -102,7 +102,7 @@ State and lock manifests are OCI image manifests packed with
 
 The lock's generation metadata (`generation`, `lease_expiry`, `holder_id`) is
 a JSON blob in the `org.terraform.lock.generation` annotation
-(`client.go:135-140`).
+(key `client.go:48`, struct `client.go:135-140`, written `client.go:670`).
 
 Versioning (`max_versions > 0` only, `client.go:288-295`):
 - Current version read: state-manifest `state.version` annotation preferred;
@@ -110,6 +110,8 @@ Versioning (`max_versions > 0` only, `client.go:288-295`):
   (`client.go:683-708`).
 - Allocation: `next = current + 1`; the new manifest is tagged both
   `state-<ws>` (`client.go:307`) and `stver-<ws>-v<N>` (`client.go:315-318`).
+- Deletion (`DeleteState`) resolves and deletes only the `state-<ws>` digest
+  (`client.go:375-387`); `stver-*` version tags and lock tags are left untouched.
 
 ## 6. Versioning & allocation race
 
@@ -250,7 +252,7 @@ PUTs). Enumerated:
 - **No portable CAS.** The OCI Distribution spec defines no `If-Match` for
   manifest PUT; oras-go v2.6.2 sends no conditional headers
   (`go.mod:12`; grep for `If-Match`/`If-None-Match`/`ETag` in non-test source:
-  zero). Conditional push appears in the spec only for the optional referrers
+  zero header uses — the single hit is a comment at `client.go:510`). Conditional push appears in the spec only for the optional referrers
   tag schema.
 - **Tags are mutable and unordered.** The spec defines tags as mutable
   pointers with unspecified overwrite ordering. The practical outcome is

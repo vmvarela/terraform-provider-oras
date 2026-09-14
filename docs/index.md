@@ -1,7 +1,8 @@
 ---
 page_title: "oras Provider"
 description: |-
-  Stores Terraform state in any OCI-compatible registry using the ORAS protocol.
+  Stores Terraform state in an OCI-compatible registry using the ORAS protocol
+  (tested against ghcr.io and Zot; other registries untested).
 ---
 
 # oras Provider
