@@ -1,6 +1,6 @@
 # ADR-0001: Locking model (generation-based optimistic concurrency)
 ## Status
-Proposed
+Accepted
 
 ## Context
 No registry in use has proven conditional-write (CAS) support, so state
