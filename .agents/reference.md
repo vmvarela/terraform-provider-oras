@@ -14,7 +14,7 @@ make install           # build + copy to ~/.terraform.d/plugins/.../darwin_arm64
 
 ## Environment
 
-- Go 1.26, Terraform 1.17.0-alpha20260827 (`.terraform-version` via tfenv)
+- Go 1.26, Terraform 1.17.0-alpha20260827 (`.terraform-version` via tfenv; pinned — official beta1+ release binaries compile out the StateStore experiment via the `experimentsAllowed` ldflag, so alpha builds are required for StateStore e2e; see issue #26)
 - `TF_ENABLE_PLUGGABLE_STATE_STORAGE=1` required at runtime for Terraform to discover the experimental state store
 - Auth priority: `ORAS_TOKEN`, `GHCR_TOKEN`, `GITHUB_TOKEN` env vars (in that order), then CLI config `oci_credentials` blocks + Docker config files + Docker credential helpers, then anonymous — see `resolveCredentials` in `internal/oras/auth.go`, `internal/oras/credsource.go`, `internal/oras/dockerconfig.go`
 - Dev overrides: `make dev-override` generates a gitignored `.terraformrc.dev` with this checkout's absolute path, then `export TF_CLI_CONFIG_FILE=$PWD/.terraformrc.dev` (scoped to the repo — don't overwrite `~/.terraformrc`, it may hold `oci_credentials` blocks)
