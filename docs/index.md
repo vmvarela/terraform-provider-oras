@@ -8,7 +8,7 @@ description: |-
 
 ~> **Experimental:** Requires a Terraform 1.17+ alpha build with the pluggable state storage experiment enabled. It will not work with any stable Terraform release, and the statestore plugin API may break across alpha releases.
 
-Implements Terraform's `statestore.StateStore` interface to keep state in an OCI registry — GHCR, Docker Hub, Harbor, Zot, or self-hosted — as OCI artifact manifests.
+Implements Terraform's `statestore.StateStore` interface to keep state in an OCI-compatible registry as OCI artifact manifests. Tested against ghcr.io and Zot; other registries are untested, and behavior is registry-specific.
 
 No resources, no data sources. The provider exists solely to expose the `oras_oci` state store.
 
@@ -102,7 +102,7 @@ Each workspace maps to its own tags:
 | `stver-<workspace>-v<N>` | Versioned snapshots (when `max_versions > 0`) |
 | `locked-<workspace>` / `unlocked-<workspace>` | Lock state (`unlocked-` is the GHCR fallback) |
 
-Workspace names that aren't valid OCI tags are hashed to `ws-<hash>`, with the original name preserved in the `org.terraform.workspace` annotation.
+Workspace names that aren't valid OCI tags are hashed to `ws-<hash>`. The original workspace name is recorded in the `org.terraform.workspace` annotation on every state and lock manifest (not only hashed names).
 
 | Content | Media type |
 |---------|------------|
@@ -123,7 +123,7 @@ Running Terraform with `-lock=false` never calls `Lock`, so no lock is registere
 
 ## Version Retention
 
-When `max_versions > 0`, pruning runs asynchronously after each write (goroutine pool capped at 3). Version tags are grouped by manifest digest so identical states aren't stored twice, and the current state manifest is never deleted.
+When `max_versions > 0`, pruning runs asynchronously after each write (goroutine pool capped at 3). During pruning, version tags are grouped by manifest digest so a digest shared by several version tags is deleted once, not once per tag; each write stamps a fresh `updated_at` timestamp, so identical state bytes still produce a new manifest digest — digest grouping is a deletion strategy, not write deduplication. The current state manifest is never deleted.
 
 GHCR returns HTTP 405 on manifest deletion; the provider falls back to the GitHub Packages API, which needs `delete:packages` on your token. Without that scope, writes succeed but pruning fails.
 
@@ -134,3 +134,7 @@ Integration tests should call `client.WaitForRetention()` before asserting on ta
 - Alpha Terraform only. Stable releases (including 1.16.x and 1.17.0) do not support pluggable state storage.
 - GHCR pruning requires `delete:packages`.
 - No migration tool. Use `terraform state pull` and `terraform state push` to move existing state in.
+
+For storage internals, the locking model, race windows, failure behavior, and
+what is (and is not) guaranteed, see the
+[Architecture & Consistency page](/architecture).

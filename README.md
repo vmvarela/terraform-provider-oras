@@ -5,9 +5,9 @@
 ![Status: experimental](https://img.shields.io/badge/status-experimental-orange)
 ![Terraform: 1.17 alpha](https://img.shields.io/badge/terraform-1.17%20alpha-blue)
 
-Store Terraform state in any OCI-compatible registry — GHCR, Docker Hub, Zot, Harbor, or your
-own — using the ORAS protocol. If your team already runs an OCI registry, you can skip a
-dedicated state backend and keep state next to your container images.
+Store Terraform state in an OCI-compatible registry using the ORAS protocol — tested against
+ghcr.io and Zot; other registries are untested and behavior is registry-specific. If your team
+already runs one, you can skip a dedicated state backend and keep state next to your container images.
 
 Experimental: implements Terraform's `statestore.StateStore` plugin interface, available only in
 Terraform 1.17 alpha builds (pinned in `.terraform-version`). Set
@@ -41,6 +41,7 @@ terraform init && terraform apply
 ```
 
 Full configuration reference, storage layout, and locking semantics: [`docs/index.md`](docs/index.md).
+Architecture, consistency guarantees, and failure behavior: [`docs/architecture.md`](docs/architecture.md).
 Credential resolution: [`docs/guides/authentication.md`](docs/guides/authentication.md).
 
 ## Development
