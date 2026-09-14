@@ -33,7 +33,7 @@ rather than preventing it.
 - Residual takeover window after the 100ms stability read is unclosed and unbounded — timing-dependent mitigation, not a guarantee.
 - The VerifyLock→Put race is un-closeable: verify-then-write is NOT atomic CAS.
 - TTL staleness uses wall-clock time; clock skew between holders is unmodeled.
-- Generation is tracked on the lock tag, which `Delete()` does not touch (it removes only state/version tags); generation resets to 1 only if the lock tag itself is deleted (manual clear or registry GC of unreferenced manifests).
+- Generation is tracked on the lock tag, which `Delete()` does not touch (it removes only the `state-<ws>` digest; `stver-*` version tags and lock tags survive — corrected 2026-09-14 against `client.go:375-387`, previously stated as "state/version tags"); generation resets to 1 only if the lock tag itself is deleted (manual clear or registry GC of unreferenced manifests).
 - Whether default TTL should remain 0 (never stale) is an OPEN decision, not settled here.
 - TTL expiry makes a lock *clearable by rivals*, not *invalid for the holder*: `VerifyLock` checks holder ID only (`client.go:565-586`), so a holder can keep writing past TTL expiry until a rival acquires the lock.
 - `-lock=false` writes bypass all lock checks; concurrent writers silently last-writer-wins.

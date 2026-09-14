@@ -191,15 +191,16 @@ it does not check TTL, so TTL expiry makes a lock *clearable by rivals* (§9),
 rival acquires the lock.
 
 All verify→write windows are non-atomic (tags are mutable, unordered, plain
-PUTs). Enumerated:
+PUTs). Enumerated (window IDs `[W1]`–`[W5]` are referenced by §17's sequence
+diagram):
 
 | Window | Where | Outcome if a rival moves in between |
 |---|---|---|
-| Write `VerifyLock` → `Put` | `oci.go:343` → `oci.go:353` | Silent last-writer-wins (F7) |
-| Lock read → clearLock → tag | `client.go:415` → 430 → 457 | Rival re-locks in between |
-| Retag preflight Resolve → `Tag` | `client.go:951` → 959 | Rival re-locks after the check |
-| Retention tag list → digest grouping → enforce | `client.go:338` → 763 → 744-789 (404 skip: 803-809) | Tags left for a later prune; gone tags skipped |
-| Lock tag retry → post-verify → stability re-read | `client.go:457` → 494 → 526 | Rival wins just after the final read (F1) |
+| [W1] Write `VerifyLock` → `Put` | `oci.go:343` → `oci.go:353` | Silent last-writer-wins (F7) |
+| [W2] Lock read → clearLock → tag | `client.go:415` → 430 → 457 | Rival re-locks in between |
+| [W3] Retag preflight Resolve → `Tag` | `client.go:951` → 959 | Rival re-locks after the check |
+| [W4] Retention tag list → digest grouping → enforce | `client.go:338` → 763 → 744-789 (404 skip: 803-809) | Tags left for a later prune; gone tags skipped |
+| [W5] Lock tag retry → post-verify → stability re-read | `client.go:457` → 494 → 526 | Rival wins just after the final read (F1) |
 
 ## 11. Retention / pruning
 
@@ -231,8 +232,10 @@ PUTs). Enumerated:
 - Transient failures retry **3 attempts, 1s then 2s backoff**, with
   context cancellation preserved (`client.go:1196-1277`). Idempotency classes:
   - `PushBytes`: content-addressed ⇒ idempotent.
-  - `Tag`: re-tagging the same digest idempotent; a rival's conflicting tag is
-    **not prevented**, only detected post-hoc (F10).
+  - `Tag`: re-tagging the same digest idempotent. A rival's conflicting
+    **lock** tag is **not prevented**, only detected post-hoc (the lock path
+    post-verifies, F10); a conflicting **state** tag is silent
+    last-writer-wins — never detected.
   - `Delete`: 404 treated as success ⇒ idempotent.
 - Operations without a caller deadline get a 10-minute default timeout
   (`client.go:180,184-189`).
@@ -250,10 +253,11 @@ PUTs). Enumerated:
 ## 14. OCI limitations
 
 - **No portable CAS.** The OCI Distribution spec defines no `If-Match` for
-  manifest PUT; oras-go v2.6.2 sends no conditional headers
-  (`go.mod:12`; grep for `If-Match`/`If-None-Match`/`ETag` in non-test source:
-  zero header uses — the single hit is a comment at `client.go:510`). Conditional push appears in the spec only for the optional referrers
-  tag schema.
+  manifest PUT. The provider sets no conditional headers (grep for
+  `If-Match`/`If-None-Match`/`ETag` in non-test source: zero header uses — the
+  single hit is a comment at `client.go:510`), and oras-go v2.6.2's manifest
+  `push`/`Tag` likewise issue plain GET/PUT with no conditional headers
+  (oras-go `registry/remote/repository.go`, v2.6.2).
 - **Tags are mutable and unordered.** The spec defines tags as mutable
   pointers with unspecified overwrite ordering. The practical outcome is
   last-writer-wins; this is observed behavior, not a spec guarantee.
@@ -268,6 +272,9 @@ PUTs). Enumerated:
   (`client.go:951`) — a transient network error fails the fallback unlock.
 
 ## 15. Failure scenarios
+
+Scenario IDs `F1`–`F13` follow the adversarial analysis's original order of
+first definition, grouped here by operation rather than renumbered.
 
 **Lock**
 
@@ -285,7 +292,7 @@ PUTs). Enumerated:
 | F6 | Write while holding locally-known lock | lockFor → VerifyLock → Put; passes only if the registry tag still points at the holder | `oci.go:341-353` |
 | F7 | Ownership change between verify and write | VerifyLock → Put is **not atomic**; rival retags in between ⇒ silent last-writer-wins | `oci.go:343,353` |
 | F8 | `-lock=false` | No Lock call ⇒ no registration ⇒ VerifyLock skipped ⇒ unverified Put | `oci.go:341-351` |
-| F10 | Mutation applied, response lost | PushBytes idempotent (content-addressed); same-digest Tag idempotent, rival Tag conflicting-but-undetected-until-post-hoc; Delete 404-as-success; lock-Tag ambiguous, resolved post-hoc; 3× retry, 1s/2s | `client.go:1196-1277` |
+| F10 | Mutation applied, response lost | PushBytes idempotent (content-addressed); same-digest Tag idempotent, rival **lock**-Tag conflicting-but-undetected-until-post-hoc, rival **state**-Tag silently wins; Delete 404-as-success; lock-Tag ambiguous, resolved post-hoc; 3× retry, 1s/2s | `client.go:1196-1277` |
 
 **Unlock**
 
@@ -332,10 +339,10 @@ Lock (§7)
   2. held & not stale       → contention error              client.go:427-429
      held & stale (TTL > 0) → clearLock, continue           client.go:430,911-922
   3. PUT  lock manifest     → gen X+1, plain tag PUT        client.go:457-465
-     [W3] rival PUT between the clear and this tag can win
+      [W2] rival PUT between the clear and this tag can win
   4. GET  re-read           → gen/holder must be ours       client.go:494-507
   5. wait 100 ms, re-read   → digest/gen/holder must be ours client.go:515-539
-     [W6] rival PUT after this read still wins — window unclosed (F1)
+      [W5] rival PUT after this read still wins — window unclosed (F1)
 
   Terraform Core ◀─ LockID ─ statestore
 
@@ -344,7 +351,7 @@ Write (§2, §10)
   Terraform Core ── Write ─▶ statestore
 
   1. lockFor → VerifyLock: GET lock tag, holder must be ours  oci.go:341-343, client.go:565-586
-     [W7] rival retag between VerifyLock and Put → silent last-writer-wins
+      [W1] rival retag between VerifyLock and Put → silent last-writer-wins
   2. oras.Client ── PushBytes + PUT state tag ─▶ registry     client.go:297-309
 
 Unlock (§8)

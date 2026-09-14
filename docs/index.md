@@ -78,7 +78,7 @@ A runnable version lives in [`examples/main.tf`](../examples/main.tf).
 | `compression`    |          | `false`               | Gzip the state layer |
 | `lock_ttl`       |          | —                     | Go duration (`15m`, `1h`); stale locks past this lease are cleared on the next `Lock`. Unset means locks never expire |
 | `max_versions`   |          | `0` (unlimited)       | Versions retained per workspace. `1` keeps only the current state |
-| `max_state_size` |          | `268435456` (256 MiB) | Hard read limit; guards against a corrupted or malicious layer |
+| `max_state_size` |          | `268435456` (256 MiB) | Hard read/write limit; guards against a corrupted or malicious layer |
 
 ## Provider Arguments
 
@@ -114,11 +114,11 @@ Workspace names that aren't valid OCI tags are hashed to `ws-<hash>`. The origin
 
 ## Locking
 
-Best-effort, generation-based optimistic concurrency. Each `Lock` writes a lock manifest with an incremented generation counter and a holder ID, then re-reads the lock tag — after a short, context-cancellable wait — to confirm it still won the race. This second read catches a rival that tagged the lock after the first verification; when ownership has moved, `Lock` reports contention instead of clearing a tag that points at someone else. Releasing a lock (or retagging it to the `unlocked-` marker on registries without manifest deletion) re-checks the tag right before overwriting it.
+Best-effort, generation-based optimistic concurrency. Each `Lock` writes a lock manifest with an incremented generation counter and a holder ID, immediately re-reads the lock tag to confirm it still won the race, then — after a short, context-cancellable wait — re-reads it a second time. This second read catches a rival that tagged the lock after the first verification; when ownership has moved, `Lock` reports contention instead of clearing a tag that points at someone else. Releasing a lock (or retagging it to the `unlocked-` marker on registries without manifest deletion) re-checks the tag right before overwriting it.
 
-OCI tags are last-writer-wins: the OCI Distribution spec has no portable compare-and-swap (no `If-Match` across registries). These checks narrow the race window but cannot close it entirely — **do not treat this as strong mutual exclusion**. For most teams the practical protection is that Terraform operations are human-paced and lock acquisition is verified before every write.
+OCI tags are last-writer-wins: the OCI Distribution spec has no portable compare-and-swap (no `If-Match` across registries). These checks narrow the race window but cannot close it entirely — **do not treat this as strong mutual exclusion**. For most teams the practical protection is that Terraform operations are human-paced and lock acquisition is verified before every write while a lock is registered in the current process — writes proceed unverified after a restart or with `-lock=false`.
 
-`lock_ttl` recovers orphaned locks: a lock whose lease has expired is cleared on the next `Lock` attempt (no background goroutines). Unset means locks never expire, and a crashed client blocks the workspace until someone releases it.
+`lock_ttl` recovers orphaned locks: a lock whose stored lease has expired (`lease_expiry > 0`) is cleared on the next `Lock` attempt (no background goroutines). Unset means locks never expire, and a crashed client blocks the workspace until someone releases it. Note: a lock written while `lock_ttl` was unset has no lease timestamp, so enabling `lock_ttl` later does not clear it — it stays until manually released.
 
 Running Terraform with `-lock=false` never calls `Lock`, so no lock is registered and writes proceed without the ownership verification described above.
 
