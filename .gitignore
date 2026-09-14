@@ -20,7 +20,6 @@ dist/
 .envrc
 
 # Agent tooling
-.agents/
 .claude/
 .opencode/
 .slim/

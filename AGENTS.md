@@ -1,60 +1,97 @@
-# AGENTS.md — terraform-provider-oras
+# AGENTS.md
 
-Terraform Plugin Framework provider implementing `statestore.StateStore` for OCI registries via ORAS. Module: `github.com/vmvarela/terraform-provider-oras`.
+If sources disagree, consult `.agents/` (see `.agents/README.md#authority`); this file is an index.
 
-## Quick start
+## Project
 
-```bash
-go build -o terraform-provider-oras .
-make test              # go test -race -count=1 ./...
-make install           # build + copy to ~/.terraform.d/plugins/.../darwin_arm64/
-```
-
-## Environment
-
-- **Go 1.26**, **Terraform 1.17.0-alpha20260827** (`.terraform-version` via tfenv)
-- `TF_ENABLE_PLUGGABLE_STATE_STORAGE=1` required at runtime for Terraform to discover the experimental state store
-- Auth: `ORAS_TOKEN`, `GHCR_TOKEN`, or `GITHUB_TOKEN` env vars (checked in that priority order), then CLI config `oci_credentials` blocks + Docker config files + Docker credential helpers, then anonymous (see `resolveCredentials` in `internal/oras/auth.go`, `internal/oras/credsource.go`, `internal/oras/dockerconfig.go`)
-- Dev overrides: `make dev-override` generates a gitignored `.terraformrc.dev` with this checkout's absolute path, then `export TF_CLI_CONFIG_FILE=$PWD/.terraformrc.dev` (scoped to the repo — don't overwrite `~/.terraformrc`, it may hold `oci_credentials` blocks)
-
-## Test
-
-```bash
-make test               # unit tests with race detector
-TF_ORAS_ZOT_TEST=1 make test-zot   # Zot integration (requires Docker)
-```
-
-- Unit tests use `fakeORASRepo` in-memory repo (`helper_test.go`) — no external dependencies
-- No testify, no mocks; manual test doubles via interface delegation
-- Integration tests spin a Zot container per test via Docker (tagged `zot-linux-amd64:v2.1.0`)
-- `make lint` runs `golangci-lint run ./...`
+`terraform-provider-oras` is an experimental Terraform StateStore
+provider that stores Terraform state in OCI-compatible registries
+using ORAS.
 
 ## Architecture
 
-```
-main.go → providerserver.Serve → internal/provider/ (OrasProvider)
-                                     │
-                                     ├─ ProviderWithStateStores returns OCIStateStore factory
-                                     └─ ProviderData flows to Initialize → Configure chain
-                                              ↓
-internal/statestore/oci.go → ProviderData + wraps internal/oras/ client
-internal/oras/             → ORAS push/pull/lock/delete via oras-go v2, auth, GHCR fallback
-```
+The intended dependency direction is:
 
-- OCI tag scheme: `state-<workspace>`, `stver-<workspace>-v<N>`, `locked-<workspace>`, `unlocked-<workspace>` (GHCR fallback)
-- Lock uses generation-based optimistic concurrency; stale locks auto-cleared via TTL
-- Async retention goroutines (semaphore-limited, sem=3) prune old versions on Put
-- `Client.WaitForRetention()` blocks until all async retention completes — call before assertions in tests
+Terraform StateStore
+→ internal/statestore
+→ internal/oras
+→ ORAS Go
+→ OCI registry
 
-## Release / CI
+Terraform-specific concerns must remain in `internal/statestore`.
+OCI/registry-specific behavior must remain in `internal/oras`.
 
-- CI: `.github/workflows/ci.yml` runs `go build ./...` + `go test -race -count=1 ./...` on ubuntu/macos/windows, plus `golangci-lint` v2.12, `govulncheck`, Zot/GHCR/Terraform integration jobs. `.github/workflows/codeql.yml` runs CodeQL weekly + on PR
-- Lint config: `.golangci.yml` (v2 format). gosec G304/G204 are excluded repo-wide (reading user-configured CA/Docker config paths and exec'ing credential helpers are core features); G118 excluded in `client.go` (retention goroutine deliberately outlives the request context)
-- Release: GoReleaser (`.goreleaser.yml`) on tags `v*`, non-draft release (`prerelease: auto`), optional GPG signature; release-drafter (`.github/workflows/release-drafter.yml`) owns the changelog (GoReleaser changelog disabled)
-- Functional example: `examples/main.tf` (Zot local + `insecure` provider)
+## Core principles
 
-## Notes
+- Correctness over feature count.
+- Evidence over assumptions.
+- Prefer simple designs over clever abstractions.
+- Do not claim guarantees unsupported by the underlying registry.
+- Do not silently change architecture while implementing a task.
+- Avoid unrelated refactoring.
+- Preserve compatibility unless a deliberate change is being made.
 
-- Provider has zero data sources and zero resources — state-store-only
-- Media types: `application/vnd.terraform.statefile.v1` (plain), `+gzip` (compressed)
-- Default max state size: 256 MiB
+## Consistency
+
+Distributed operations must explicitly identify:
+
+- ownership
+- generation/version
+- race windows
+- failure modes
+- retry behavior
+- stale actors
+
+Never describe verify-then-write as atomic CAS.
+
+Registry-specific behavior must be treated as registry-specific
+unless it is demonstrated to be portable.
+
+## Testing
+
+Concurrency-sensitive changes require appropriate:
+
+- unit tests
+- race detection
+- adversarial scenarios
+- failure injection
+- integration tests
+
+A test should demonstrate the property we actually care about,
+not merely execute the implementation.
+
+## AI-assisted development
+
+AI-generated code and analysis are untrusted until reviewed.
+
+The human maintainer owns:
+
+- architecture
+- protocol interpretation
+- consistency guarantees
+- compatibility claims
+- security decisions
+- final acceptance
+
+## Project knowledge
+
+Read the relevant files under `.agents/` before working on:
+
+- Terraform StateStore
+- OCI/ORAS behavior
+- concurrency
+- registry integration
+
+## Workflow
+
+For non-trivial work:
+
+investigate
+→ design
+→ implement
+→ review
+→ adversarial review
+→ verify
+
+Do not skip investigation when correctness depends on external
+protocols, specifications, or registry behavior.
