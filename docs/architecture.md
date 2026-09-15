@@ -125,8 +125,24 @@ The two-layer race (no guard, no test):
    and one writer's state.
 
 Concurrent writes are only protected by the (itself racy) lock path
-(§10). There is no test demonstrating allocation mutual exclusion because the
-implementation does not provide it.
+(§10). There is no test demonstrating allocation mutual exclusion
+because the implementation does not provide it. What *is* tested:
+`TestStateStoreConcurrentWritesVersionRetention`
+(`oci_concurrency_test.go:946`) runs eight concurrent writers with
+`max_versions > 0` and asserts what remains true under the
+read→tag race — exactly one readable payload (LWW on `state-<ws>`), at
+most `max_versions` surviving `stver-*` tags, and every surviving tag
+resolving to a manifest. That demonstrates **LWW/tag consistency, not
+allocation mutual exclusion**: writers may still pick the same version
+number or skip numbers.
+
+Test-harness caveat (a framework fact, not a provider property): the
+concurrent suite drives contenders at the `oras` layer and never calls
+`fwss.NewLockInfo` concurrently, because terraform-plugin-framework
+v1.19.0's `statestore.generateLockID` races on its own unsynchronized
+package-level `math/rand` source (`oci_concurrency_test.go:179-183`).
+The suite's avoidance of that path is a workaround, not a guarantee
+the provider provides.
 
 ## 7. Lock acquisition
 
@@ -152,6 +168,17 @@ one tag+verify attempt** (transport-level retries only):
 The 100 ms `lockStabilityDelay` is a **fixed, unconfigurable constant**
 (`client.go:66`) — a mitigation that narrows the late-rival window; it cannot
 close it (residual window after the re-read is unbounded).
+
+**Blind lock-tag retry.** The lock-tag PUT is wrapped in `retry`
+(`client.go:457-465`; 3 attempts, 1s/2s backoff). A retried attempt re-runs
+the plain tag PUT **without re-reading the lock tag, re-checking the
+generation, or conditioning on the current holder**. A rival that acquires
+through the normal Lock flow during the retry backoff is silently clobbered
+by the retried tag — and the subsequent post-verify and stability re-read
+then *pass*, because the tag points at the retrier's own manifest. This is a
+documented hole, not a fixed one
+(`TestStateStoreRetryBlindLockTagLimitation`, fake-only; GREEN PROVES THE
+HOLE — see §15).
 
 ## 8. Release
 
@@ -191,8 +218,12 @@ it does not check TTL, so TTL expiry makes a lock *clearable by rivals* (§9),
 rival acquires the lock.
 
 All verify→write windows are non-atomic (tags are mutable, unordered, plain
-PUTs). Enumerated (window IDs `[W1]`–`[W5]` are referenced by §17's sequence
-diagram):
+PUTs). Additionally, `Write` verifies ownership **once, before the first Put
+attempt** (`oci.go:341-353`); the operation-level retry around Put
+(`client.go:262-269`) re-runs push+tag blindly and does **not** re-verify
+ownership between attempts — a retried state Put can overwrite a newer write
+(`TestStateStoreStateRetryBlindOverwriteLimitation`). Enumerated (window IDs
+`[W1]`–`[W5]` are referenced by §17's sequence diagram):
 
 | Window | Where | Outcome if a rival moves in between |
 |---|---|---|
@@ -218,7 +249,12 @@ diagram):
 - GHCR returns 405 for manifest deletion; the fallback uses the GitHub
   Packages API, which requires **`delete:packages`** on the token (`ghcr.go:52-98`,
   `client.go:882-899`). Without it: writes succeed, pruning fails with a warn log
-  (`client.go:340,354`).
+  (`client.go:340,354`). Evidence precision: the 405 fallback branch is
+  unit-tested against a **simulated** 405 registry (`deleteUnsupportedRepo`,
+  `client_test.go`); live GHCR integration exists but is **conditional**
+  (env-gated behind `TF_ORAS_GHCR_TEST`, `ghcr_integration_test.go:12-16`) —
+  neither is a portable guarantee, and a live run does not necessarily prove
+  the 405 branch executed. Registry-specific, not portable.
 - `WaitForRetention()` (`client.go:630-634`) exists **for tests only**; the
   provider has no shutdown hook, so in-flight prunes are undrained on process
   exit (missed prunes self-heal on later writes; a lost prune never un-writes
@@ -232,10 +268,14 @@ diagram):
 - Transient failures retry **3 attempts, 1s then 2s backoff**, with
   context cancellation preserved (`client.go:1196-1277`). Idempotency classes:
   - `PushBytes`: content-addressed ⇒ idempotent.
-  - `Tag`: re-tagging the same digest idempotent. A rival's conflicting
-    **lock** tag is **not prevented**, only detected post-hoc (the lock path
-    post-verifies, F10); a conflicting **state** tag is silent
-    last-writer-wins — never detected.
+  - `Tag`: re-tagging the same digest idempotent. Retries are **blind**:
+    a retried conflicting **lock** tag silently clobbers a rival that
+    acquired during the backoff — undetected, because post-verify and the
+    stability re-read then see the retrier's own manifest (§7, F10,
+    `TestStateStoreRetryBlindLockTagLimitation`); a retried conflicting
+    **state** tag overwrites a newer write — never detected, and ownership
+    is verified only before the *first* attempt, never between retries
+    (§10, F10).
   - `Delete`: 404 treated as success ⇒ idempotent.
 - Operations without a caller deadline get a 10-minute default timeout
   (`client.go:180,184-189`).
@@ -292,7 +332,7 @@ first definition, grouped here by operation rather than renumbered.
 | F6 | Write while holding locally-known lock | lockFor → VerifyLock → Put; passes only if the registry tag still points at the holder | `oci.go:341-353` |
 | F7 | Ownership change between verify and write | VerifyLock → Put is **not atomic**; rival retags in between ⇒ silent last-writer-wins | `oci.go:343,353` |
 | F8 | `-lock=false` | No Lock call ⇒ no registration ⇒ VerifyLock skipped ⇒ unverified Put | `oci.go:341-351` |
-| F10 | Mutation applied, response lost | PushBytes idempotent (content-addressed); same-digest Tag idempotent, rival **lock**-Tag conflicting-but-undetected-until-post-hoc, rival **state**-Tag silently wins; Delete 404-as-success; lock-Tag ambiguous, resolved post-hoc; 3× retry, 1s/2s | `client.go:1196-1277` |
+| F10 | Mutation applied, response lost | PushBytes idempotent (content-addressed); same-digest Tag idempotent; **retries are blind**: a retried **lock**-tag PUT clobbers a rival that acquired during the 1s/2s backoff and is *not* detected (post-verify then sees the retrier's own manifest — not "resolved post-hoc"); a retried **state**-tag PUT overwrites a newer write with no re-verification (ownership checked only before the first attempt, `oci.go:341-353`); Delete 404-as-success; 3× retry, 1s/2s | `client.go:457-465,1196-1277`; `TestStateStoreRetryBlindLockTagLimitation`, `TestStateStoreStateRetryBlindOverwriteLimitation` |
 
 **Unlock**
 
@@ -321,7 +361,7 @@ first definition, grouped here by operation rather than renumbered.
 | **In-process (Go-enforced)** | Local registry invariants under the mutex | Shared lock registry across per-RPC instances (`oci.go:55-90`); empty-LockID unlock refused (`oci.go:417-424`); stale unlock never drops newer acquisition (`oci.go:84-90`) |
 | **OCI-object-enforced** | Content addressing | Digest comparisons on fetch/retag preflight return the bytes that digest names; deletes target a digest resolved moments earlier (`client.go:480,955`) |
 | **Best-effort (detect after the fact)** | Contention *detection*, not prevention | Generation + holder checks, 100 ms stability re-read, VerifyLock, preflight digest guards, read-back verification |
-| **Registry-specific** | Valid only for demonstrated registries | GHCR 405 → retagToUnlocked; GHCR Packages API delete (`delete:packages`); zot delete path; untested outside ghcr.io + zot 2.1.0 |
+| **Registry-specific** | Valid only for demonstrated registries | GHCR 405 → retagToUnlocked (405 branch simulated in unit tests; live GHCR integration env-gated, see §11); GHCR Packages API delete (`delete:packages`); zot delete path; untested outside ghcr.io + zot 2.1.0 |
 | **Not guaranteed (portably or otherwise)** | Explicit non-goals | Mutual exclusion; atomic verify→write; portable CAS/`If-Match`; spec-portable LWW tag ordering; allocation-race-free concurrent writes; TTL-based recovery of TTL = 0 locks |
 
 ## 17. Lock lifecycle & write-path sequence

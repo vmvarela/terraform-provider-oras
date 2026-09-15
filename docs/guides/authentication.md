@@ -30,9 +30,11 @@ For ghcr.io, `GHCR_TOKEN` and `GITHUB_TOKEN` are also checked. Required scopes:
 
 - `read:packages` — read state
 - `write:packages` — write state
-- `delete:packages` — **required for `max_versions` retention.** GHCR returns HTTP 405 on manifest
-  deletion, so the provider falls back to the GitHub Packages API. Without this scope, writes
-  succeed but pruning fails.
+- `delete:packages` — **required for `max_versions` retention.** When GHCR returns HTTP 405 on manifest
+  deletion, the provider falls back to the GitHub Packages API. Without this scope, writes
+  succeed but pruning fails. Evidence precision: the 405 fallback branch is unit-tested against
+  a simulated 405 registry; live GHCR integration is env-gated and does not necessarily prove
+  the 405 branch executed. Registry-specific, not portable.
 
 ## Configured Credentials
 
@@ -109,7 +111,9 @@ The default Actions `GITHUB_TOKEN` has `read:packages` and `write:packages` but 
 **401 / "authentication required"** — check the variable name, the token scopes, and expiry. For
 ghcr.io, confirm the token can see the package.
 
-**405 on delete** — expected on GHCR. The Packages API fallback needs `delete:packages`.
+**405 on delete** — observed when GHCR refuses manifest deletion (the 405 fallback is unit-tested
+with a simulated 405 registry; live GHCR integration is env-gated and does not necessarily prove
+the 405 branch). The Packages API fallback needs `delete:packages`.
 
 **`x509: certificate signed by unknown authority`** — set `ca_file`, or `insecure = true` for local
 plain-HTTP registries.

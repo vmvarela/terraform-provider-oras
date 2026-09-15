@@ -1053,9 +1053,13 @@ func diffTags(all, sub []string) []string {
 //
 // GREEN PROVES THE HOLE: the honest assertions are that BOTH writes report
 // success AND the final Read returns A's payload (A's stale retry clobbered B).
-// If the retry ever re-verifies ownership, this test fails and the LIMITATION
-// note must be updated. If instead A's retry is refused (scenario changed),
-// the assertions below fail with an explicit message.
+// What the test proves is that the overwrite happens in this injected
+// scenario; the claim that the retry has no ownership re-verification is
+// established by source inspection (client.go:262-269 re-runs wc.put without
+// re-verifying), not proven by this test passing. If this test fails,
+// re-evaluate the documented behavior and the LIMITATION note. If instead
+// A's retry is refused (scenario changed), the assertions below fail with an
+// explicit message.
 // Layer: fake-only (transient injection hook; sequential verification).
 func TestStateStoreStateRetryBlindOverwriteLimitation(t *testing.T) {
 	ctx := context.Background()

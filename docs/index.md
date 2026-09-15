@@ -77,7 +77,7 @@ A runnable version lives in [`examples/main.tf`](../examples/main.tf).
 | `url`            | ✓        | —                     | `oci://<registry>/<repository>`; registry may include a port |
 | `compression`    |          | `false`               | Gzip the state layer |
 | `lock_ttl`       |          | —                     | Go duration (`15m`, `1h`); stale locks past this lease are cleared on the next `Lock`. Unset means locks never expire |
-| `max_versions`   |          | `0` (unlimited)       | Versions retained per workspace. `1` keeps only the current state |
+| `max_versions`   |          | `0` (versioning disabled) | Versions retained per workspace. `1` keeps only the current state; `0` keeps no version tags, allocates no versions, and prunes nothing |
 | `max_state_size` |          | `268435456` (256 MiB) | Hard read/write limit; guards against a corrupted or malicious layer |
 
 ## Provider Arguments
@@ -126,7 +126,7 @@ Running Terraform with `-lock=false` never calls `Lock`, so no lock is registere
 
 When `max_versions > 0`, pruning runs asynchronously after each write (goroutine pool capped at 3). During pruning, version tags are grouped by manifest digest so a digest shared by several version tags is deleted once, not once per tag; each write stamps a fresh `updated_at` timestamp, so identical state bytes still produce a new manifest digest — digest grouping is a deletion strategy, not write deduplication. The current state manifest is never deleted.
 
-GHCR returns HTTP 405 on manifest deletion; the provider falls back to the GitHub Packages API, which needs `delete:packages` on your token. Without that scope, writes succeed but pruning fails.
+When GHCR returns HTTP 405 on manifest deletion, the provider falls back to the GitHub Packages API, which needs `delete:packages` on your token. Without that scope, writes succeed but pruning fails. Evidence precision: the 405 fallback branch is unit-tested against a simulated 405 registry; live GHCR integration is env-gated and does not necessarily prove the 405 branch executed. Registry-specific, not portable.
 
 Integration tests should call `client.WaitForRetention()` before asserting on tag state.
 

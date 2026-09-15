@@ -128,11 +128,11 @@ func (s *OCIStateStore) Schema(_ context.Context, _ fwss.SchemaRequest, resp *fw
 			},
 			"lock_ttl": ssschema.StringAttribute{
 				Optional:            true,
-				MarkdownDescription: "Duration for state lock TTL (e.g., `15m`, `1h`). Stale locks older than this value are automatically cleared.",
+				MarkdownDescription: "Duration for state lock TTL (e.g., `15m`, `1h`). With a positive TTL, a lock whose lease has expired is stale and is cleared by the next Lock call that reaches the registry. There is no background reaper: stale locks are not cleaned until someone attempts a Lock. Defaults to unset/`0`, which means locks never expire and a crashed holder must be cleared manually.",
 			},
 			"max_versions": ssschema.Int64Attribute{
 				Optional:            true,
-				MarkdownDescription: "Maximum number of state versions to retain. When exceeded, the oldest versions are pruned. Defaults to `0` (unlimited).",
+				MarkdownDescription: "Maximum number of state versions to retain. When exceeded, the oldest versions are pruned. Defaults to `0` (versioning disabled: no version tags, no allocation, no pruning).",
 			},
 			"max_state_size": ssschema.Int64Attribute{
 				Optional:            true,
