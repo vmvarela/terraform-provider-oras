@@ -186,12 +186,15 @@ func waitSignal(t *testing.T, ch <-chan struct{}, what string) {
 // OCIStateStore.Lock does after a successful acquire).
 //
 // The concurrent contenders are driven at the oras layer (ssd.client.Lock):
-// the fwss Lock wrapper is exercised sequentially (see test 2) because
-// fwss.NewLockInfo races on the framework's own global math/rand source when
-// called concurrently — a pre-existing data race inside
-// terraform-plugin-framework v1.19.0 (statestore.generateLockID, unsynchronized
-// package-level *rand.Rand), surfaced by this suite under -race. It is not
-// addressable from here (framework dependency, production code untouched).
+// same-workspace fwss contention is deterministic only that way. Concurrent
+// fwss.Lock calls are separately covered by
+// TestStateStoreConcurrentFwssLock (test 17), which relies on the
+// provider-side serialization of fwss.NewLockInfo (newLockInfoMu in oci.go) —
+// a compatibility workaround for terraform-plugin-framework v1.19.0's
+// unsynchronized package-level *rand.Rand in statestore.generateLockID
+// (surfaced by this suite under -race). The upstream defect remains
+// dependency-specific; the provider mutex removes the in-process RNG race
+// for this provider path only.
 //
 // Qualified I1: fake-serialized, no induced transients — the fake registry's
 // single mutex serializes tag operations, so the winner is decided by real
@@ -1384,5 +1387,94 @@ func TestStateStoreWriteVerifyLockInterrupted(t *testing.T) {
 	// The cancelled write must not register or drop anything.
 	if id, ok := ssd.lockFor("default"); !ok || id != lockResp.LockID {
 		t.Errorf("registration = (%q, %v), want the lock preserved", id, ok)
+	}
+}
+
+// ─── 17. Concurrent fwss.Lock wrapper (framework RNG workaround) ──────────────
+
+// TestStateStoreConcurrentFwssLock — Property: the real OCIStateStore.Lock
+// wrapper may be invoked concurrently (Terraform runs RPCs in parallel), and
+// independent store CONFIGURATIONS must work in parallel too: actors are
+// split across TWO independently initialized stores, each with its own
+// stateStoreData, *oras.Client, and fake registry endpoint. All locks on
+// DISTINCT workspaces (ws-0..7) succeed, LockIDs are non-empty and distinct,
+// and each group's lockFor registration matches its own lock.
+//
+// This exercises the provider-side serialization of fwss.NewLockInfo
+// (newLockInfoMu in oci.go) — a compatibility workaround for
+// terraform-plugin-framework v1.19.0's unsynchronized package-level
+// *rand.Rand in statestore.generateLockID. It is NOT distributed locking, and
+// the upstream defect remains dependency-specific; the provider mutex removes
+// the in-process RNG race for this provider path only.
+//
+// Meaningful under -race: a DATA RACE report in statestore.generateLockID
+// from this test means the provider mutex no longer covers the call
+// (regression). No sleeps: the start barrier creates the concurrency; each
+// fake registry's mutex serializes HTTP requests within its endpoint.
+// Layer: Go-race + logical (distinct workspaces; no same-workspace contention).
+func TestStateStoreConcurrentFwssLock(t *testing.T) {
+	ctx := context.Background()
+
+	// Two independently initialized store configurations: separate
+	// stateStoreData, separate *oras.Client, separate fake registry endpoints.
+	const groups, perGroup = 2, 4
+	const n = groups * perGroup
+	ssds := make([]*stateStoreData, groups)
+	for g := 0; g < groups; g++ {
+		_, baseURL := newConcurrencyRegistry(t, nil)
+		_, ssd := newConfiguredStore(t, "", baseURL, 0)
+		ssds[g] = ssd
+	}
+
+	stateIDs := make([]string, n)
+	ids := make([]string, n)
+	actorGroup := make([]int, n)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		g := i / perGroup
+		actorGroup[i] = g
+		instance := testNewInstance(t, ssds[g])
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start // barrier: all Lock RPCs released at once
+			resp := &fwss.LockResponse{}
+			stateID := fmt.Sprintf("ws-%d", i)
+			instance.Lock(ctx, fwss.LockRequest{StateID: stateID, Operation: "apply"}, resp)
+			if resp.Diagnostics.HasError() {
+				t.Errorf("Lock(%q) failed: %v", stateID, resp.Diagnostics)
+				return
+			}
+			if resp.LockID == "" {
+				t.Errorf("Lock(%q) returned an empty LockID", stateID)
+			}
+			stateIDs[i] = stateID
+			ids[i] = resp.LockID
+		}(i)
+	}
+	close(start)
+	waitGroup(t, &wg)
+
+	seen := make(map[string]string, n)
+	perGroupSuccess := make([]int, groups)
+	for i := 0; i < n; i++ {
+		if stateIDs[i] == "" {
+			t.Fatalf("actor %d did not record its StateID", i)
+		}
+		if id, ok := seen[ids[i]]; ok {
+			t.Errorf("LockID %q used by both %q and %q; want distinct", ids[i], id, stateIDs[i])
+		}
+		seen[ids[i]] = stateIDs[i]
+		perGroupSuccess[actorGroup[i]]++
+		// Each group's own lock registry must hold its own actor's lock.
+		if got, ok := ssds[actorGroup[i]].lockFor(stateIDs[i]); !ok || got != ids[i] {
+			t.Errorf("registration for %q (group %d) = (%q, %v), want (%q, true)", stateIDs[i], actorGroup[i], got, ok, ids[i])
+		}
+	}
+	for g := 0; g < groups; g++ {
+		if perGroupSuccess[g] != perGroup {
+			t.Errorf("group %d successful locks = %d, want %d", g, perGroupSuccess[g], perGroup)
+		}
 	}
 }

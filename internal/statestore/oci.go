@@ -419,11 +419,25 @@ func (s *OCIStateStore) GetStates(ctx context.Context, _ fwss.GetStatesRequest, 
 
 // ─── Locking ──────────────────────────────────────────────────────────────────
 
+// newLockInfoMu is a compatibility workaround, NOT distributed locking and
+// not a replacement for an upstream fix: terraform-plugin-framework v1.19.0's
+// statestore.generateLockID reads its own unsynchronized package-level
+// *rand.Rand (rngSource), which is a data race when Lock RPCs run concurrently
+// (surfaced by oci_concurrency_test.go under -race). Serializing ONLY the
+// fwss.NewLockInfo call removes that in-process RNG race for this provider
+// path; it provides no cross-process/distributed safety whatsoever and must
+// be revisited (removed) after an upstream synchronized release.
+var newLockInfoMu sync.Mutex
+
 // Lock acquires a lock for the given workspace. Uses generation-based optimistic
 // concurrency control via the ORAS client to detect simultaneous lock attempts.
 func (s *OCIStateStore) Lock(ctx context.Context, req fwss.LockRequest, resp *fwss.LockResponse) {
 	// Create a new LockInfo for this attempt (generates UUID, Who, Created).
+	// Narrow mutex: held only for the framework call, released before any
+	// registry/network operation (see newLockInfoMu).
+	newLockInfoMu.Lock()
 	fwLockInfo := fwss.NewLockInfo(req)
+	newLockInfoMu.Unlock()
 
 	// Map framework LockInfo → oras LockInfo.
 	orasLockInfo := oras.LockInfo{

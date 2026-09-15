@@ -136,13 +136,19 @@ resolving to a manifest. That demonstrates **LWW/tag consistency, not
 allocation mutual exclusion**: writers may still pick the same version
 number or skip numbers.
 
-Test-harness caveat (a framework fact, not a provider property): the
-concurrent suite drives contenders at the `oras` layer and never calls
-`fwss.NewLockInfo` concurrently, because terraform-plugin-framework
-v1.19.0's `statestore.generateLockID` races on its own unsynchronized
-package-level `math/rand` source (`oci_concurrency_test.go:179-183`).
-The suite's avoidance of that path is a workaround, not a guarantee
-the provider provides.
+Test-harness caveat (a framework fact, not a provider property):
+terraform-plugin-framework v1.19.0's `statestore.generateLockID` races on its
+own unsynchronized package-level `math/rand` source when Lock RPCs run
+concurrently. **Provider-local mitigation (Phase C):** `OCIStateStore.Lock`
+serializes ONLY the `fwss.NewLockInfo` call with a narrow package-level mutex
+(`newLockInfoMu`, released before any registry/network operation). This
+removes the in-process RNG race for this provider path — concurrent
+`fwss.Lock` wrapper calls are covered by
+`TestStateStoreConcurrentFwssLock` under `-race` — but it is NOT distributed
+locking and does not fix the dependency itself; removal is reconsidered only
+after this provider adopts AND verifies an upstream synchronized framework
+version. Same-workspace contention in the suite is
+still driven at the `oras` layer for determinism.
 
 ## 7. Lock acquisition
 
