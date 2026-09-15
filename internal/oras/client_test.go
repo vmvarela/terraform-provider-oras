@@ -1300,6 +1300,57 @@ func TestClient_VerifyLock_RivalHolder(t *testing.T) {
 	}
 }
 
+// TestClient_VerifyLock_StoredLeaseExpiry — VerifyLock enforces the manifest's
+// STORED lease_expiry against the verifier's wall clock, independent of the
+// verifier's own configured LockTTL: a positive past lease is refused, a
+// future lease is fine, and LeaseExpiry = 0 remains non-expiring. (The local
+// config here has LockTTL = 0 — locally "never stale" — so only the stored
+// value can refuse.) Wall-clock/skew caveats per VerifyLock's doc comment.
+func TestClient_VerifyLock_StoredLeaseExpiry(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	cases := []struct {
+		name        string
+		leaseExpiry int64
+		wantErr     bool
+	}{
+		{name: "past stored lease refused", leaseExpiry: now.UnixNano() - int64(time.Hour), wantErr: true},
+		{name: "future stored lease ok", leaseExpiry: now.UnixNano() + int64(time.Hour)},
+		{name: "zero stored lease never expires", leaseExpiry: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newFakeORASRepo()
+			repo := &orasRepositoryClient{inner: fake}
+			client := newTestClient(repo) // verifier config: LockTTL = 0
+			c := newRemoteClient(repo, "default")
+
+			desc, err := c.packLockManifest(ctx, `{"ID":"lock-1"}`, 1, tc.leaseExpiry, "lock-1")
+			if err != nil {
+				t.Fatalf("pack lock manifest: %v", err)
+			}
+			if err := fake.Tag(ctx, desc, c.lockTag); err != nil {
+				t.Fatalf("tag lock manifest: %v", err)
+			}
+
+			err = client.VerifyLock(ctx, "default", "lock-1")
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected VerifyLock to refuse an expired stored lease, got nil")
+				}
+				if !strings.Contains(err.Error(), "expired") {
+					t.Errorf("error = %v, want it to say the lease expired", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("VerifyLock: %v", err)
+			}
+		})
+	}
+}
+
 func TestClient_VerifyLock_UnlockedMarker(t *testing.T) {
 	// After an unlock via retag-to-unlocked (delete-unsupported registry),
 	// the lock tag points at an empty marker: VerifyLock must fail.

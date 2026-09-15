@@ -128,11 +128,11 @@ func (s *OCIStateStore) Schema(_ context.Context, _ fwss.SchemaRequest, resp *fw
 			},
 			"lock_ttl": ssschema.StringAttribute{
 				Optional:            true,
-				MarkdownDescription: "Duration for state lock TTL (e.g., `15m`, `1h`). Stale locks older than this value are automatically cleared.",
+				MarkdownDescription: "Duration for state lock TTL (e.g., `15m`, `1h`). With a positive TTL, a lock whose lease has expired is stale and is cleared by the next Lock call that reaches the registry. There is no background reaper: stale locks are not cleaned until someone attempts a Lock. Defaults to unset/`0`, which means locks never expire and a crashed holder must be cleared manually.",
 			},
 			"max_versions": ssschema.Int64Attribute{
 				Optional:            true,
-				MarkdownDescription: "Maximum number of state versions to retain. When exceeded, the oldest versions are pruned. Defaults to `0` (unlimited).",
+				MarkdownDescription: "Maximum number of state versions to retain. When exceeded, the oldest versions are pruned. Defaults to `0` (versioning disabled: no version tags, no allocation, no pruning).",
 			},
 			"max_state_size": ssschema.Int64Attribute{
 				Optional:            true,
@@ -341,6 +341,16 @@ func (s *OCIStateStore) Write(ctx context.Context, req fwss.WriteRequest, resp *
 	localLockID, held := s.shared.lockFor(req.StateID)
 	if held {
 		if err := s.client.VerifyLock(ctx, req.StateID, localLockID); err != nil {
+			// Cancellation/deadline first: the check was interrupted, and the
+			// caller must see that rather than a lost-lock framing.
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				resp.Diagnostics.AddError(
+					"State write interrupted",
+					fmt.Sprintf("Verifying the lock for workspace %q was interrupted before ownership could be confirmed: %v. Re-run the operation with a fresh lock.",
+						req.StateID, err),
+				)
+				return
+			}
 			resp.Diagnostics.AddError(
 				"State lock no longer held",
 				fmt.Sprintf("Refusing to write state for workspace %q: the lock held by this operation is no longer valid (%v). Another client may have taken over; re-run the operation to acquire a fresh lock.",
@@ -351,6 +361,41 @@ func (s *OCIStateStore) Write(ctx context.Context, req fwss.WriteRequest, resp *
 	}
 
 	if err := s.client.Put(ctx, req.StateID, req.StateBytes); err != nil {
+		// Cancellation/deadline first: the operation was interrupted, and the
+		// caller must see that rather than a publication-conflict framing.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			resp.Diagnostics.AddError(
+				"State write interrupted",
+				fmt.Sprintf("Writing state for workspace %q was interrupted before it could be confirmed: %v. Re-run the operation with a fresh lock.",
+					req.StateID, err),
+			)
+			return
+		}
+		var partial *oras.PartialPublicationError
+		if errors.As(err, &partial) {
+			// The state tag published successfully; only the version-tag
+			// publication failed/conflicted. The state is visible and
+			// readable — do NOT tell the caller the write was wholly rejected.
+			resp.Diagnostics.AddError(
+				"State version publication failed",
+				fmt.Sprintf("State for workspace %q was published successfully under tag %q, but publishing the version tag %q failed (%v). The state is readable; the version metadata for this write may be missing, and the failed version tag was left untouched (it may belong to another writer). Re-run the operation with a fresh lock to publish the next version.",
+					req.StateID, partial.StateTag, partial.VersionTag, partial.Err),
+			)
+			return
+		}
+		if errors.Is(err, oras.ErrMutableTagMoved) {
+			// A transient write failure left the state tag's ownership
+			// ambiguous: the publication failed closed instead of blindly
+			// re-applying over a possibly newer state. Note this does NOT
+			// mean the lock was proven lost — the ordinary verify→Put
+			// TOCTOU window remains (oci_concurrency_test.go, Test 9).
+			resp.Diagnostics.AddError(
+				"State publication conflict",
+				fmt.Sprintf("Refusing to publish state for workspace %q: the state tag could not be confirmed as ours after a transient write failure (%v). Another client may have published newer state; the write failed closed rather than overwrite it. Re-run the operation with a fresh lock and write again.",
+					req.StateID, err),
+			)
+			return
+		}
 		resp.Diagnostics.AddError("Failed to write state", err.Error())
 	}
 }
@@ -374,11 +419,25 @@ func (s *OCIStateStore) GetStates(ctx context.Context, _ fwss.GetStatesRequest, 
 
 // ─── Locking ──────────────────────────────────────────────────────────────────
 
+// newLockInfoMu is a compatibility workaround, NOT distributed locking and
+// not a replacement for an upstream fix: terraform-plugin-framework v1.19.0's
+// statestore.generateLockID reads its own unsynchronized package-level
+// *rand.Rand (rngSource), which is a data race when Lock RPCs run concurrently
+// (surfaced by oci_concurrency_test.go under -race). Serializing ONLY the
+// fwss.NewLockInfo call removes that in-process RNG race for this provider
+// path; it provides no cross-process/distributed safety whatsoever and must
+// be revisited (removed) after an upstream synchronized release.
+var newLockInfoMu sync.Mutex
+
 // Lock acquires a lock for the given workspace. Uses generation-based optimistic
 // concurrency control via the ORAS client to detect simultaneous lock attempts.
 func (s *OCIStateStore) Lock(ctx context.Context, req fwss.LockRequest, resp *fwss.LockResponse) {
 	// Create a new LockInfo for this attempt (generates UUID, Who, Created).
+	// Narrow mutex: held only for the framework call, released before any
+	// registry/network operation (see newLockInfoMu).
+	newLockInfoMu.Lock()
 	fwLockInfo := fwss.NewLockInfo(req)
+	newLockInfoMu.Unlock()
 
 	// Map framework LockInfo → oras LockInfo.
 	orasLockInfo := oras.LockInfo{

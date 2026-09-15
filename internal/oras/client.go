@@ -130,6 +130,38 @@ func (e *LockError) Error() string {
 // Unwrap exposes the underlying error so errors.Is(err, errStateLocked) works.
 func (e *LockError) Unwrap() error { return e.Err }
 
+// ErrMutableTagMoved is returned when, after a transient (lost or failed)
+// response while publishing to a mutable OCI tag, the tag resolves to a
+// foreign manifest — or its state cannot be determined. OCI tags have no CAS,
+// so re-applying the publication would blindly overwrite whoever published
+// last; the operation fails closed instead. Callers must treat this as
+// "another writer may have won the tag": for the lock tag report contention,
+// for the state tag refuse the write and ask for a fresh lock.
+var ErrMutableTagMoved = errors.New("mutable OCI tag moved or ambiguous")
+
+// PartialPublicationError reports a PARTIAL publication: the state manifest
+// was published successfully (StateTag is visible and ours), but a
+// subsequent mutable tag of the same publication — currently the version tag
+// — failed or conflicted (Err carries the underlying failure, possibly
+// wrapping ErrMutableTagMoved). The state write is NOT wholly rejected: the
+// state is readable. This is deliberately typed (not a sentinel) so callers
+// can inspect which tag succeeded and which failed; false failure is
+// preferred over silently overwriting the version tag, so no retry is made.
+type PartialPublicationError struct {
+	// StateTag is the mutable tag that published successfully.
+	StateTag string
+	// VersionTag is the mutable tag whose publication failed.
+	VersionTag string
+	// Err is the underlying failure of the version-tag publication.
+	Err error
+}
+
+func (e *PartialPublicationError) Error() string {
+	return fmt.Sprintf("state published under %q, but publishing version tag %q failed: %v", e.StateTag, e.VersionTag, e.Err)
+}
+
+func (e *PartialPublicationError) Unwrap() error { return e.Err }
+
 // ─── Internal types ───────────────────────────────────────────────────────────
 
 // lockManifestData holds metadata stored in a lock manifest's annotations.
@@ -259,13 +291,21 @@ func (wc *workspaceClient) get(ctx context.Context) ([]byte, error) {
 }
 
 // Put stores the state for the given stateID.
+//
+// Content-addressed steps (layer push, manifest pack, version read) are
+// idempotent/retried; the mutable state/version tag publications go through
+// publishMutableTag, so a transient tag response is never followed by a blind
+// re-apply: own digest ⇒ response-lost success, foreign digest ⇒ fail closed,
+// absent tag ⇒ fail closed (no re-apply: a Resolve(404)→Tag reapply is itself
+// a clobber window), ambiguous ⇒ fail closed. The old behavior — wrapping the
+// whole put in a retry that re-pushed and re-tagged with a fresh manifest
+// digest — is gone: it silently overwrote a rival's newer state because
+// ownership is verified only once, before the first Put.
 func (c *Client) Put(ctx context.Context, stateID string, data []byte) error {
 	ctx, cancel := c.opContext(ctx)
 	defer cancel()
 	wc := newWorkspaceClient(c, stateID)
-	return retry(ctx, func(ctx context.Context) error {
-		return wc.put(ctx, data)
-	})
+	return wc.put(ctx, data)
 }
 
 func (wc *workspaceClient) put(ctx context.Context, state []byte) error {
@@ -285,26 +325,49 @@ func (wc *workspaceClient) put(ctx context.Context, state []byte) error {
 		layerMediaType = mediaTypeStateLayerGzip
 	}
 
+	// The version number is read under retry, but only ONCE per publication:
+	// recomputing it per retry attempt would mint different version tags.
 	var nextVersion int
 	if wc.client.config.MaxVersions > 0 {
-		current, err := wc.currentStateVersion(ctx)
+		v, err := retryWithResult(ctx, func(ctx context.Context) (int, error) {
+			current, err := wc.currentStateVersion(ctx)
+			if err != nil {
+				return 0, fmt.Errorf("failed to determine current state version: %w", err)
+			}
+			return current + 1, nil
+		})
 		if err != nil {
-			return fmt.Errorf("failed to determine current state version: %w", err)
+			return err
 		}
-		nextVersion = current + 1
+		nextVersion = v
 	}
 
-	layerDesc, err := oras.PushBytes(ctx, wc.client.repoClient.inner, layerMediaType, stateToPush)
+	layerDesc, err := retryWithResult(ctx, func(ctx context.Context) (ocispec.Descriptor, error) {
+		return oras.PushBytes(ctx, wc.client.repoClient.inner, layerMediaType, stateToPush)
+	})
 	if err != nil {
 		return err
 	}
 
-	manifestDesc, err := wc.packStateManifest(ctx, []ocispec.Descriptor{layerDesc}, nextVersion)
+	// Manifest annotations are computed ONCE so every push attempt of the
+	// same publication has identical bytes — and therefore one stable digest.
+	// (packStateManifest stamps a fresh updated_at per call and is kept for
+	// the retention retag path, which wants exactly that.)
+	annotations := map[string]string{
+		annotationWorkspace: wc.stateID,
+		annotationUpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if nextVersion > 0 {
+		annotations[annotationStateVersion] = strconv.Itoa(nextVersion)
+	}
+	manifestDesc, err := retryWithResult(ctx, func(ctx context.Context) (ocispec.Descriptor, error) {
+		return wc.packStateManifestAnnotated(ctx, []ocispec.Descriptor{layerDesc}, annotations)
+	})
 	if err != nil {
 		return err
 	}
 
-	if err := wc.client.repoClient.inner.Tag(ctx, manifestDesc, wc.stateTag); err != nil {
+	if err := wc.publishMutableTag(ctx, manifestDesc, wc.stateTag); err != nil {
 		return err
 	}
 
@@ -313,8 +376,16 @@ func (wc *workspaceClient) put(ctx context.Context, state []byte) error {
 	}
 
 	newVersionTag := wc.versionTagFor(nextVersion)
-	if err := wc.client.repoClient.inner.Tag(ctx, manifestDesc, newVersionTag); err != nil {
-		return err
+	if err := wc.publishMutableTag(ctx, manifestDesc, newVersionTag); err != nil {
+		// The state tag is already published and ours: report the failure as
+		// PARTIAL (state visible, version publication failed) instead of a
+		// whole-write rejection. The failed version tag is never re-applied
+		// or deleted (false-failure preference: it may belong to a rival).
+		return &PartialPublicationError{
+			StateTag:   wc.stateTag,
+			VersionTag: newVersionTag,
+			Err:        err,
+		}
 	}
 
 	// Async retention: limits concurrent goroutines via semaphore.
@@ -454,12 +525,21 @@ func (wc *workspaceClient) lock(ctx context.Context, info *LockInfo) (string, er
 		return "", err
 	}
 
-	if err := retry(ctx, func(ctx context.Context) error {
-		return wc.client.repoClient.inner.Tag(ctx, manifestDesc, wc.lockTag)
-	}); err != nil {
-		if held, _, fetchErr := wc.fetchManifestWithDesc(ctx, wc.lockTag); fetchErr == nil {
-			existing, _ := parseLockInfo(&held, wc.stateTag)
-			return "", &LockError{Info: existing, Err: errStateLocked}
+	if err := wc.publishMutableTag(ctx, manifestDesc, wc.lockTag); err != nil {
+		if errors.Is(err, ErrMutableTagMoved) {
+			// The lock tag points at (or may point at) another holder's
+			// manifest: report contention instead of clobbering the rival.
+			// The returned *LockError must let errors.Is see BOTH
+			// classifications — errStateLocked (contention semantics,
+			// unchanged for callers) and ErrMutableTagMoved (moved/ambiguous
+			// publication) — while Info keeps the fetched holder.
+			if held, _, fetchErr := wc.fetchManifestWithDesc(ctx, wc.lockTag); fetchErr == nil {
+				existing, _ := parseLockInfo(&held, wc.stateTag)
+				return "", &LockError{
+					Info: existing,
+					Err:  fmt.Errorf("%w: lock tag %q moved during acquisition: %w", errStateLocked, wc.lockTag, err),
+				}
+			}
 		}
 		return "", err
 	}
@@ -550,11 +630,16 @@ func (c *Client) Unlock(ctx context.Context, stateID, lockID string) error {
 }
 
 // VerifyLock reports whether the lock for stateID is still held by lockID: it
-// reads the lock tag and compares the lock holder ID. It returns an error when
-// the lock is gone, held by a different holder, or the check itself fails.
-// There is no CAS on OCI tags, so a caller cannot close the race between a
-// successful VerifyLock and a subsequent Put — this is a best-effort
-// ownership check.
+// reads the lock tag, compares the lock holder ID, and — after the holder
+// matches — rejects a STORED positive lease_expiry already past the
+// verifier's wall clock (the stored expiry governs, NOT the verifier's
+// configured LockTTL; LeaseExpiry = 0 remains non-expiring). It returns an
+// error when the lock is gone, held by a different holder, past its stored
+// lease, or the check itself fails.
+// There is no CAS on OCI tags and registries do not enforce leases, so a
+// caller cannot close the race between a successful VerifyLock and a
+// subsequent Put — this is a best-effort ownership check (the W1 window is
+// unchanged; clock skew between holders is unmodeled).
 func (c *Client) VerifyLock(ctx context.Context, stateID, lockID string) error {
 	ctx, cancel := c.opContext(ctx)
 	defer cancel()
@@ -582,7 +667,135 @@ func (wc *workspaceClient) verifyLock(ctx context.Context, lockID string) error 
 	if existing.ID != lockID {
 		return fmt.Errorf("lock for %q is held by %q, not %q", wc.lockTag, existing.ID, lockID)
 	}
+	// Stored-lease enforcement: the manifest's own lease_expiry decides, not
+	// the verifier's configured LockTTL (the holder and a rival may have
+	// different TTL configs; the stored value is what was agreed at
+	// acquisition). LeaseExpiry = 0 remains non-expiring. Takeover staleness
+	// (isLockStale) is a separate, config-TTL-based check on the next Lock.
+	lease, err := parseLockManifestData(&fm)
+	if err != nil {
+		return fmt.Errorf("failed to verify lock: %w", err)
+	}
+	if isStoredLeaseExpired(lease) {
+		return fmt.Errorf("lock for %q expired: stored lease_expiry is in the past (%s; checked with the local clock; clock skew between holders is unmodeled)",
+			wc.lockTag, time.Unix(0, lease.LeaseExpiry).UTC().Format(time.RFC3339Nano))
+	}
 	return nil
+}
+
+// isStoredLeaseExpired reports whether a stored positive lease_expiry is
+// already past according to the local wall clock. The verifier's configured
+// LockTTL is deliberately ignored here: the manifest's stored expiry is the
+// shared fact both sides agree on. LeaseExpiry <= 0 means non-expiring.
+func isStoredLeaseExpired(data *lockManifestData) bool {
+	if data == nil || data.LeaseExpiry <= 0 {
+		return false
+	}
+	return time.Now().UTC().UnixNano() > data.LeaseExpiry
+}
+
+// mutableTagObservationLimit bounds how often the tag is OBSERVED after a
+// transient mutable-tag publication failure before failing closed. The tag
+// is never re-applied after a transient failure: a Resolve→Tag reapply is
+// itself a clobber window (rivals can publish between the 404 and a re-Tag).
+const mutableTagObservationLimit = 3
+
+// mutableTagObservationDelay is the backoff base between observation
+// attempts; the worst-case bounded wait is 1.5 seconds (0.5s + 1.0s before
+// the final observation). The publication is never re-applied on an unknown
+// tag state, so no longer wait is needed.
+const mutableTagObservationDelay = 500 * time.Millisecond
+
+// publishMutableTag publishes desc under tag via a plain Tag PUT, with
+// observation instead of blind retry after a transient (response-lost or
+// failed) result.
+//
+// This is NOT CAS and does not claim to be: the initial Tag proceeds
+// normally, and concurrent writers are still last-writer-wins (the W1/W5
+// windows are unchanged). What this prevents is the BLIND reapplication of a
+// publication whose response was lost: a retried tag PUT cannot silently
+// overwrite a rival that published in the gap, and an ambiguous result fails
+// closed instead of being re-applied.
+//
+//   - initial Tag succeeds          → done.
+//   - Tag fails non-transiently     → surface the error (no observation).
+//   - Tag fails transiently         → observeMutableTag (below).
+func (wc *workspaceClient) publishMutableTag(ctx context.Context, desc ocispec.Descriptor, tag string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	tagErr := wc.client.repoClient.inner.Tag(ctx, desc, tag)
+	if tagErr == nil {
+		return nil
+	}
+	if !isTransientError(tagErr) {
+		return tagErr
+	}
+	return wc.observeMutableTag(ctx, desc, tag, tagErr)
+}
+
+// observeMutableTag reacts to a transient publication failure by observing
+// the tag before ever re-tagging:
+//
+//   - resolves to desc.Digest → the response was lost, the publication landed:
+//     success, no second Tag is issued.
+//   - resolves to a foreign digest → ErrMutableTagMoved, no re-tag.
+//   - not found → the lost response did not publish, but the tag is NEVER
+//     re-applied: Resolve→Tag is itself a clobber window (a rival can publish
+//     between the 404 and a re-Tag), so the publication fails closed.
+//   - ambiguous (transient resolve error, or the bound exhausted) → fail
+//     closed with ErrMutableTagMoved: false failure is preferable to
+//     silently overwriting a possibly newer publication.
+//
+// All waits are bounded and context-cancellable; cancellation identity
+// (context.Canceled / context.DeadlineExceeded) is preserved on fail-closed
+// errors.
+func (wc *workspaceClient) observeMutableTag(ctx context.Context, desc ocispec.Descriptor, tag string, initialErr error) error {
+	failClosed := func(detail string, cause error) error {
+		err := fmt.Errorf("%w: state of tag %q unknown after transient publish error (%w); %s; refusing to re-apply, a re-tag could overwrite a newer publication",
+			ErrMutableTagMoved, tag, initialErr, detail)
+		if cause != nil {
+			return fmt.Errorf("%w: %w", err, cause)
+		}
+		return err
+	}
+
+	for attempt := 1; attempt <= mutableTagObservationLimit; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return failClosed("observation cancelled", err)
+		}
+		current, resolveErr := wc.client.repoClient.inner.Resolve(ctx, tag)
+		switch {
+		case resolveErr == nil:
+			if current.Digest == desc.Digest {
+				// The initial response was lost, but the publication landed.
+				return nil
+			}
+			return fmt.Errorf("%w: tag %q points at %s, not this attempt's digest %s; refusing to overwrite",
+				ErrMutableTagMoved, tag, current.Digest, desc.Digest)
+		case isNotFound(resolveErr):
+			// KNOWN absent (not unknown state): the lost response did not
+			// publish. Fail closed — a Resolve(404)→Tag re-apply is itself a
+			// clobber window (a rival can publish between the 404 and a
+			// re-Tag).
+			return fmt.Errorf("%w: tag %q confirmed absent after transient publish error (%w), observation %d of %d; refusing to re-apply, a Resolve(404)→Tag reapply is a clobber window",
+				ErrMutableTagMoved, tag, initialErr, attempt, mutableTagObservationLimit)
+		case isTransientError(resolveErr):
+			// Observation itself failed transiently: bounded re-observation,
+			// never a re-Tag on an unknown tag state.
+		default:
+			// Non-transient observation error: ambiguous, fail closed.
+			return failClosed(fmt.Sprintf("unresolvable after %d attempt(s)", attempt), resolveErr)
+		}
+		if attempt < mutableTagObservationLimit {
+			select {
+			case <-ctx.Done():
+				return failClosed("observation cancelled", ctx.Err())
+			case <-time.After(time.Duration(attempt) * mutableTagObservationDelay):
+			}
+		}
+	}
+	return failClosed(fmt.Sprintf("%d observations did not disambiguate", mutableTagObservationLimit), initialErr)
 }
 
 func (wc *workspaceClient) unlock(ctx context.Context, id string) error {
@@ -643,6 +856,13 @@ func (wc *workspaceClient) packStateManifest(ctx context.Context, layers []ocisp
 	if stateVersion > 0 {
 		annotations[annotationStateVersion] = strconv.Itoa(stateVersion)
 	}
+	return wc.packStateManifestAnnotated(ctx, layers, annotations)
+}
+
+// packStateManifestAnnotated packs the state manifest with caller-provided
+// annotations, so a publication can be re-pushed with identical bytes (one
+// stable digest) instead of minting a fresh updated_at per attempt.
+func (wc *workspaceClient) packStateManifestAnnotated(ctx context.Context, layers []ocispec.Descriptor, annotations map[string]string) (ocispec.Descriptor, error) {
 	return oras.PackManifest(ctx, wc.client.repoClient.inner, oras.PackManifestVersion1_1, artifactTypeState, oras.PackManifestOptions{
 		Layers:              layers,
 		ManifestAnnotations: annotations,

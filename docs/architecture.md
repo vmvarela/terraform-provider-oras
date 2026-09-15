@@ -125,8 +125,30 @@ The two-layer race (no guard, no test):
    and one writer's state.
 
 Concurrent writes are only protected by the (itself racy) lock path
-(§10). There is no test demonstrating allocation mutual exclusion because the
-implementation does not provide it.
+(§10). There is no test demonstrating allocation mutual exclusion
+because the implementation does not provide it. What *is* tested:
+`TestStateStoreConcurrentWritesVersionRetention`
+(`oci_concurrency_test.go:946`) runs eight concurrent writers with
+`max_versions > 0` and asserts what remains true under the
+read→tag race — exactly one readable payload (LWW on `state-<ws>`), at
+most `max_versions` surviving `stver-*` tags, and every surviving tag
+resolving to a manifest. That demonstrates **LWW/tag consistency, not
+allocation mutual exclusion**: writers may still pick the same version
+number or skip numbers.
+
+Test-harness caveat (a framework fact, not a provider property):
+terraform-plugin-framework v1.19.0's `statestore.generateLockID` races on its
+own unsynchronized package-level `math/rand` source when Lock RPCs run
+concurrently. **Provider-local mitigation (Phase C):** `OCIStateStore.Lock`
+serializes ONLY the `fwss.NewLockInfo` call with a narrow package-level mutex
+(`newLockInfoMu`, released before any registry/network operation). This
+removes the in-process RNG race for this provider path — concurrent
+`fwss.Lock` wrapper calls are covered by
+`TestStateStoreConcurrentFwssLock` under `-race` — but it is NOT distributed
+locking and does not fix the dependency itself; removal is reconsidered only
+after this provider adopts AND verifies an upstream synchronized framework
+version. Same-workspace contention in the suite is
+still driven at the `oras` layer for determinism.
 
 ## 7. Lock acquisition
 
@@ -139,7 +161,7 @@ one tag+verify attempt** (transport-level retries only):
    held & stale (TTL>0)     → clearLock           (430, 911-922)
 3. generation = prev + 1                          (436-439)
    lease = now + TTL iff TTL > 0                   (441-444)
-4. tag lock manifest, w/ retry                    (457-465)
+4. publish lock tag via publishMutableTag          (457-465)
 5. post-verify: re-read, check gen + holder       (494-507)
    → mismatch: report contention; cleanupOurTag
      (digest-guarded delete / 405→retagToUnlocked,
@@ -152,6 +174,22 @@ one tag+verify attempt** (transport-level retries only):
 The 100 ms `lockStabilityDelay` is a **fixed, unconfigurable constant**
 (`client.go:66`) — a mitigation that narrows the late-rival window; it cannot
 close it (residual window after the re-read is unbounded).
+
+**Observed (not blind) lock-tag retry.** The lock-tag publication goes
+through `publishMutableTag` (`client.go`): the initial Tag PUT proceeds
+normally; on a **transient** failure the helper **observes** the tag before
+ever re-tagging — own digest ⇒ response-lost publication confirmed (success,
+no second Tag); foreign digest ⇒ `ErrMutableTagMoved` mapped to a
+`*LockError{holder}` contention diagnostic, no re-tag; absent tag ⇒ fail
+closed (a Resolve(404)→Tag reapply is itself a clobber window); ambiguous
+(transient resolve error or bound exhausted) ⇒ fail closed. This is NOT CAS —
+the W1/W5 windows below are unchanged — it only prevents a blind re-application
+after an ambiguous mutable-tag result
+(`TestStateStoreLockTagRetryFailClosed`, regression guard since the
+retry-safety change). **Scope:** the observed-publication guarantee applies to
+FOREGROUND state/version publication only; asynchronous retention retags
+(`retagToNewManifest`, §11) remain raw last-writer-wins and are out of scope
+for this guarantee.
 
 ## 8. Release
 
@@ -185,14 +223,39 @@ Consequences:
 ## 10. Optimistic concurrency semantics
 
 **Best-effort, generation-based; last-writer-wins.** Not atomic CAS — see
-ADR-0001 and §14. `VerifyLock` compares **holder ID only** (`client.go:565-586`):
-it does not check TTL, so TTL expiry makes a lock *clearable by rivals* (§9),
-**not invalid for its holder** — a holder can keep writing past expiry until a
-rival acquires the lock.
+ADR-0001 and §14. `VerifyLock` compares **holder ID**, then enforces the
+manifest's **STORED** `lease_expiry` (`client.go` verifyLock +
+`isStoredLeaseExpired`, Fase D): a positive stored lease already past the
+**verifier's local wall clock** is refused ("lock ... expired"); `LeaseExpiry
+= 0` remains non-expiring; the verifier's own configured `LockTTL` is
+irrelevant to this check (config changes do not alter a stored expiry).
+Takeover staleness (`isLockStale`, §9) remains a separate, config-TTL-based
+check on the next `Lock`. Two hard limits remain: the expiry comparison is
+**local-wall-clock** (holder/rival clock skew is unmodeled) and the check is
+**client-side only** — registries do not enforce leases, and a write verified
+before expiry whose lease expires during the in-flight Put still lands
+(W1 unchanged, `TestStateStoreWriteExpiryDuringW1Limitation`).
 
 All verify→write windows are non-atomic (tags are mutable, unordered, plain
-PUTs). Enumerated (window IDs `[W1]`–`[W5]` are referenced by §17's sequence
-diagram):
+PUTs). Additionally, `Write` verifies ownership **once, before the first Put
+attempt** (`oci.go:341-353`); the Put path keeps that property: content-addressed
+steps are retried with one stable manifest digest, but the mutable state/version
+tag publication is **observed, not blind** — a transient tag failure fails
+closed on a foreign/ambiguous/absent tag (`ErrMutableTagMoved` → actionable
+"State publication conflict" diagnostic in `oci.go`) instead of re-running the
+whole `put` with a fresh timestamp/digest. If the state tag published but the
+VERSION tag publication fails/conflicts, the write reports a **partial
+publication** (`*oras.PartialPublicationError` → "State version publication
+failed" diagnostic stating the state is already visible; the failed version
+tag is left untouched). The retried publication is still not ownership-checked
+(no VerifyLock inside the publication), so the W1 TOCTOU below is unchanged;
+what changed is that an ambiguous transient result can no longer be blindly
+re-applied over a newer write
+(`TestStateStoreStateRetryFailClosed`,
+`TestStateStorePartialVersionPublicationFailClosed`). **Scope:** foreground
+state/version publication only; async retention retags remain raw LWW.
+Enumerated (window IDs
+`[W1]`–`[W5]` are referenced by §17's sequence diagram):
 
 | Window | Where | Outcome if a rival moves in between |
 |---|---|---|
@@ -200,7 +263,7 @@ diagram):
 | [W2] Lock read → clearLock → tag | `client.go:415` → 430 → 457 | Rival re-locks in between |
 | [W3] Retag preflight Resolve → `Tag` | `client.go:951` → 959 | Rival re-locks after the check |
 | [W4] Retention tag list → digest grouping → enforce | `client.go:338` → 763 → 744-789 (404 skip: 803-809) | Tags left for a later prune; gone tags skipped |
-| [W5] Lock tag retry → post-verify → stability re-read | `client.go:457` → 494 → 526 | Rival wins just after the final read (F1) |
+| [W5] Lock tag publication → post-verify → stability re-read | `client.go` publishMutableTag → 494 → 526 | Rival wins just after the final read (F1); window unclosed |
 
 ## 11. Retention / pruning
 
@@ -218,7 +281,12 @@ diagram):
 - GHCR returns 405 for manifest deletion; the fallback uses the GitHub
   Packages API, which requires **`delete:packages`** on the token (`ghcr.go:52-98`,
   `client.go:882-899`). Without it: writes succeed, pruning fails with a warn log
-  (`client.go:340,354`).
+  (`client.go:340,354`). Evidence precision: the 405 fallback branch is
+  unit-tested against a **simulated** 405 registry (`deleteUnsupportedRepo`,
+  `client_test.go`); live GHCR integration exists but is **conditional**
+  (env-gated behind `TF_ORAS_GHCR_TEST`, `ghcr_integration_test.go:12-16`) —
+  neither is a portable guarantee, and a live run does not necessarily prove
+  the 405 branch executed. Registry-specific, not portable.
 - `WaitForRetention()` (`client.go:630-634`) exists **for tests only**; the
   provider has no shutdown hook, so in-flight prunes are undrained on process
   exit (missed prunes self-heal on later writes; a lost prune never un-writes
@@ -232,10 +300,18 @@ diagram):
 - Transient failures retry **3 attempts, 1s then 2s backoff**, with
   context cancellation preserved (`client.go:1196-1277`). Idempotency classes:
   - `PushBytes`: content-addressed ⇒ idempotent.
-  - `Tag`: re-tagging the same digest idempotent. A rival's conflicting
-    **lock** tag is **not prevented**, only detected post-hoc (the lock path
-    post-verifies, F10); a conflicting **state** tag is silent
-    last-writer-wins — never detected.
+  - `Tag`: re-tagging the same digest is idempotent, but **mutable-tag
+    publications are no longer retried blindly**: `publishMutableTag`
+    observes the tag after a transient failure — own digest ⇒ response-lost
+    success, foreign digest ⇒ fail closed (`ErrMutableTagMoved`), absent tag
+    ⇒ fail closed (no Resolve(404)→Tag reapply: that is itself a clobber
+    window), ambiguous ⇒ fail closed (§7, §10, F10,
+    `TestStateStoreLockTagRetryFailClosed`,
+    `TestStateStoreStateRetryFailClosed`). The same helper covers version-tag
+    publication, so a foreign version tag is never retagged; a version-tag
+    failure after a successful state publication surfaces as a PARTIAL
+    publication error. **Scope:** foreground state/version publication only;
+    async retention retags (`retagToNewManifest`) remain raw LWW.
   - `Delete`: 404 treated as success ⇒ idempotent.
 - Operations without a caller deadline get a 10-minute default timeout
   (`client.go:180,184-189`).
@@ -282,7 +358,7 @@ first definition, grouped here by operation rather than renumbered.
 |---|---|---|---|
 | F1 | Two clients acquire concurrently | Both read gen X, both tag X+1; post-verify and the 100 ms stability re-read detect the loser post-hoc; residual window after re-read unclosed | `client.go:415-422,494-539` |
 | F3 | Expired takeover | Next Lock sees `now > expiry`, clearLock, tags gen+1; requires stored LeaseExpiry > 0 (TTL = 0 never clearable) | `client.go:409-465,901-909` |
-| F4 | Stale owner after takeover | VerifyLock is holder-ID only; pre-takeover holder keeps passing VerifyLock until the rival's tag lands; its later writes fail on ID mismatch | `client.go:565-586` |
+| F4 | Stale owner after takeover / expired lease | VerifyLock checks holder ID, then the STORED lease_expiry (Fase D): after stored expiry the pre-takeover holder is refused at VerifyLock; before expiry it keeps passing VerifyLock until expiry or a rival's tag lands; expiry during an in-flight verified Put still lands (W1) | `client.go` verifyLock/isStoredLeaseExpired; `TestStateStoreTTLExpiryRefusesStaleWrite`, `TestStateStoreWriteExpiryDuringW1Limitation` |
 | F9 | Registry unavailable before op | RPC returns an error diagnostic; Lock maps already-locked vs transport errors distinctly | `oci.go:393-405` |
 
 **Write**
@@ -292,7 +368,7 @@ first definition, grouped here by operation rather than renumbered.
 | F6 | Write while holding locally-known lock | lockFor → VerifyLock → Put; passes only if the registry tag still points at the holder | `oci.go:341-353` |
 | F7 | Ownership change between verify and write | VerifyLock → Put is **not atomic**; rival retags in between ⇒ silent last-writer-wins | `oci.go:343,353` |
 | F8 | `-lock=false` | No Lock call ⇒ no registration ⇒ VerifyLock skipped ⇒ unverified Put | `oci.go:341-351` |
-| F10 | Mutation applied, response lost | PushBytes idempotent (content-addressed); same-digest Tag idempotent, rival **lock**-Tag conflicting-but-undetected-until-post-hoc, rival **state**-Tag silently wins; Delete 404-as-success; lock-Tag ambiguous, resolved post-hoc; 3× retry, 1s/2s | `client.go:1196-1277` |
+| F10 | Mutation applied, response lost | PushBytes idempotent (content-addressed); same-digest Tag idempotent; mutable-tag publications go through **observed retry** (`publishMutableTag`): a transient result is followed by observation — own digest ⇒ success without a second Tag, foreign digest ⇒ fail closed (`ErrMutableTagMoved`; lock tag maps to a `*LockError{holder}` contention diagnostic, state tag to an actionable "State publication conflict" diagnostic), absent tag ⇒ fail closed (no Resolve(404)→Tag reapply), ambiguous ⇒ fail closed (conservative: false failure preferred over overwriting a possibly newer state); a version-tag failure after a successful state publication ⇒ `*PartialPublicationError` ("State version publication failed", state stays visible, foreign version tag untouched); Delete 404-as-success; transport retries 3×, 1s/2s for reads/pushes only. NOT CAS: W1/W5 windows unchanged. **Scope:** foreground state/version publication only; async retention retags remain raw LWW | `client.go` publishMutableTag/observeMutableTag, `oci.go` Write; `TestStateStoreLockTagRetryFailClosed`, `TestStateStoreStateRetryFailClosed`, `TestStateStorePartialVersionPublicationFailClosed`, `internal/oras/mutabletag_test.go` |
 
 **Unlock**
 
@@ -321,7 +397,7 @@ first definition, grouped here by operation rather than renumbered.
 | **In-process (Go-enforced)** | Local registry invariants under the mutex | Shared lock registry across per-RPC instances (`oci.go:55-90`); empty-LockID unlock refused (`oci.go:417-424`); stale unlock never drops newer acquisition (`oci.go:84-90`) |
 | **OCI-object-enforced** | Content addressing | Digest comparisons on fetch/retag preflight return the bytes that digest names; deletes target a digest resolved moments earlier (`client.go:480,955`) |
 | **Best-effort (detect after the fact)** | Contention *detection*, not prevention | Generation + holder checks, 100 ms stability re-read, VerifyLock, preflight digest guards, read-back verification |
-| **Registry-specific** | Valid only for demonstrated registries | GHCR 405 → retagToUnlocked; GHCR Packages API delete (`delete:packages`); zot delete path; untested outside ghcr.io + zot 2.1.0 |
+| **Registry-specific** | Valid only for demonstrated registries | GHCR 405 → retagToUnlocked (405 branch simulated in unit tests; live GHCR integration env-gated, see §11); GHCR Packages API delete (`delete:packages`); zot delete path; untested outside ghcr.io + zot 2.1.0 |
 | **Not guaranteed (portably or otherwise)** | Explicit non-goals | Mutual exclusion; atomic verify→write; portable CAS/`If-Match`; spec-portable LWW tag ordering; allocation-race-free concurrent writes; TTL-based recovery of TTL = 0 locks |
 
 ## 17. Lock lifecycle & write-path sequence
@@ -338,7 +414,7 @@ Lock (§7)
   1. GET  lock tag          → gen X, holder (or 404)        client.go:415-422
   2. held & not stale       → contention error              client.go:427-429
      held & stale (TTL > 0) → clearLock, continue           client.go:430,911-922
-  3. PUT  lock manifest     → gen X+1, plain tag PUT        client.go:457-465
+  3. PUT  lock manifest     → observed publication           client.go publishMutableTag
       [W2] rival PUT between the clear and this tag can win
   4. GET  re-read           → gen/holder must be ours       client.go:494-507
   5. wait 100 ms, re-read   → digest/gen/holder must be ours client.go:515-539
