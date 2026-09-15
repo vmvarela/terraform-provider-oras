@@ -752,7 +752,7 @@ func (wc *workspaceClient) publishMutableTag(ctx context.Context, desc ocispec.D
 // errors.
 func (wc *workspaceClient) observeMutableTag(ctx context.Context, desc ocispec.Descriptor, tag string, initialErr error) error {
 	failClosed := func(detail string, cause error) error {
-		err := fmt.Errorf("%w: state of tag %q unknown after transient publish error (%v); %s; refusing to re-apply, a re-tag could overwrite a newer publication",
+		err := fmt.Errorf("%w: state of tag %q unknown after transient publish error (%w); %s; refusing to re-apply, a re-tag could overwrite a newer publication",
 			ErrMutableTagMoved, tag, initialErr, detail)
 		if cause != nil {
 			return fmt.Errorf("%w: %w", err, cause)
@@ -778,7 +778,7 @@ func (wc *workspaceClient) observeMutableTag(ctx context.Context, desc ocispec.D
 			// publish. Fail closed — a Resolve(404)→Tag re-apply is itself a
 			// clobber window (a rival can publish between the 404 and a
 			// re-Tag).
-			return fmt.Errorf("%w: tag %q confirmed absent after transient publish error (%v), observation %d of %d; refusing to re-apply, a Resolve(404)→Tag reapply is a clobber window",
+			return fmt.Errorf("%w: tag %q confirmed absent after transient publish error (%w), observation %d of %d; refusing to re-apply, a Resolve(404)→Tag reapply is a clobber window",
 				ErrMutableTagMoved, tag, initialErr, attempt, mutableTagObservationLimit)
 		case isTransientError(resolveErr):
 			// Observation itself failed transiently: bounded re-observation,
