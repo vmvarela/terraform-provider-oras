@@ -19,14 +19,25 @@
 // channel-driven). The implementation's own
 // 100ms lockStabilityDelay is tolerated with generous 30s test timeouts.
 //
-// Limitation tests (TOCTOU, retry-blind, TTL-during-write) are green-proves-
-// hole: they pass while demonstrating a residual window documented in
-// ADR-0001 (.agents/decisions/0001-locking-model.md). They must fail if the
-// window is ever closed.
+// Limitation tests are green-proves-hole only where the hole is real and
+// open: the W1 verify→Put window (Test 9) and the TTL-expiry-during-write
+// window (Test 12) — both documented in ADR-0001
+// (.agents/decisions/0001-locking-model.md) and both must fail if the window
+// is ever closed. The former retry-blind tests (Tests 11/14) were converted
+// into positive regression guards after the mutable-tag retry-safety change
+// (internal/oras publishMutableTag): an injected transient publication
+// failure now fails closed instead of blindly re-applying, so Tests 11/14
+// assert fail-closed behavior, not a residual hole. Scope: the observed
+// publication guarantees apply to FOREGROUND state/version publication only
+// (including the partial "state lands, version tag fails closed" case of
+// Test 15); asynchronous retention retags (retagToNewManifest) remain raw
+// last-writer-wins — no claim is made that ALL version-tag writes are
+// protected.
 package statestore
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -789,46 +800,66 @@ func TestStateStoreNoLockWriteBestEffort(t *testing.T) {
 	}
 }
 
-// ─── 11. Retry-blind LIMITATION: retried lock tag clobbers the winner ─────────
+// ─── 11. Lock-tag retry: fail closed on a rival takeover (regression guard) ───
 
-// TestStateStoreRetryBlindLockTagLimitation — LIMITATION (Gate1 #2): the
-// lock-tag PUT retry is blind to a rival that acquires in the retry gap.
-// A's first lock-tag PUT gets a transient 500; while A backs off (1s), B runs
-// the REAL Lock flow to completion; A's retry then re-tags OVER B's
-// acquisition. GREEN PROVES THE HOLE: the retried write is blind to registry
-// state — it does not re-read the lock tag, re-check the generation, or
-// condition on the current holder. Asserted honestly below: BOTH clients are
-// reported successful and B's acquired lock is clobbered (A becomes the tag
-// holder without knowing B ever held it). If this test fails, retry blindness
-// has been fixed and the LIMITATION note must be updated.
-// Layer: fake-only (transient injection hook; real Lock flow for B).
-func TestStateStoreRetryBlindLockTagLimitation(t *testing.T) {
+// TestStateStoreLockTagRetryFailClosed — Property (positive regression guard;
+// replaces the former TestStateStoreRetryBlindLockTagLimitation green-hole
+// test after the mutable-tag retry-safety change): a transient failure on A's
+// first lock-tag publication must NOT be blindly re-applied. The hook rejects
+// A's first lock-tag PUT with a transient 500; while A observes the tag
+// (hook blocks A's first post-failure lock-tag read), a rival installs its
+// lock directly in the registry; A's observation then sees a foreign digest
+// and A FAILS with a LockError-class diagnostic naming the holder, instead of
+// re-tagging. B remains holder, and the lock tag was never clobbered (exactly
+// one lock-tag PUT reached the fake).
+// Layer: distributed + fake-only (transient injection + observation gate).
+func TestStateStoreLockTagRetryFailClosed(t *testing.T) {
 	ctx := context.Background()
 
 	var mu sync.Mutex
 	lockPuts := 0
+	lockTagReads := 0 // HEAD/GET on the lock tag after the first PUT failed
+	firstPutFailed := false
 	firstRejected := make(chan struct{}, 1)
+	observing := make(chan struct{}, 1)
+	release := make(chan struct{})
 	gate := func(r *http.Request) (<-chan struct{}, int) {
-		if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/manifests/"+testLockTag) {
-			mu.Lock()
+		isLockTag := strings.HasSuffix(r.URL.Path, "/manifests/"+testLockTag)
+		if !isLockTag {
+			return nil, 0
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.Method {
+		case http.MethodPut:
 			lockPuts++
-			n := lockPuts
-			mu.Unlock()
-			if n == 1 {
-				// Transient 500: the client treats this as retryable.
+			if lockPuts == 1 {
+				firstPutFailed = true
 				select {
 				case firstRejected <- struct{}{}:
 				default:
 				}
+				// Transient 500: the client must observe, not blind-retry.
 				return nil, http.StatusInternalServerError
+			}
+		case http.MethodHead, http.MethodGet:
+			if firstPutFailed {
+				lockTagReads++
+				if lockTagReads == 1 {
+					// Park A's post-failure observation of the tag.
+					select {
+					case observing <- struct{}{}:
+					default:
+					}
+					return release, 0
+				}
 			}
 		}
 		return nil, 0
 	}
-	_, _, ssd := newConcurrencyStore(t, "", gate)
+	_, reg, ssd := newConcurrencyStore(t, "", gate)
 
 	a := testNewInstance(t, ssd)
-	b := testNewInstance(t, ssd)
 
 	aResp := &fwss.LockResponse{}
 	var wg sync.WaitGroup
@@ -838,32 +869,43 @@ func TestStateStoreRetryBlindLockTagLimitation(t *testing.T) {
 		a.Lock(ctx, fwss.LockRequest{StateID: "default", Operation: "apply"}, aResp)
 	}()
 
-	// Attempt 1 rejected; A now sits in its 1s retry backoff.
+	// A's first lock-tag PUT was rejected; A is now parked observing the tag.
 	waitSignal(t, firstRejected, "A's first lock-tag PUT rejection")
+	waitSignal(t, observing, "A's parked observation of the lock tag")
 
-	// In the gap, B acquires through the normal Lock flow.
-	bResp := &fwss.LockResponse{}
-	b.Lock(ctx, fwss.LockRequest{StateID: "default", Operation: "apply"}, bResp)
-	if bResp.Diagnostics.HasError() {
-		t.Fatalf("B lock in retry gap: %v", bResp.Diagnostics)
-	}
+	// While A observes, a rival acquires the lock (direct registry install,
+	// as in the contention tests). This lands while A's re-tag is deferred.
+	reg.TagManifest(testLockTag, rivalLockManifest(t, "rival"))
 
-	// A's retry re-tags over B's acquisition.
+	// Release A's observation: it must see the rival's digest and fail closed.
+	close(release)
 	waitGroup(t, &wg)
 
-	// Honest LIMITATION assertions: what actually happens is that BOTH Lock
-	// calls report success and A's blind retry clobbers B's remote lock.
-	if aResp.Diagnostics.HasError() {
-		t.Fatalf("A lock after retry: %v", aResp.Diagnostics)
+	// Fail-closed assertions: A loses, the rival stays holder, and A's
+	// publication was never blindly re-applied.
+	if !aResp.Diagnostics.HasError() {
+		t.Fatalf("A's lock succeeded over a rival that acquired in the observation gap")
 	}
-	if aResp.LockID == "" || bResp.LockID == "" {
-		t.Fatalf("both contenders must believe they hold the lock: A=%q B=%q", aResp.LockID, bResp.LockID)
+	if aResp.LockID != "" {
+		t.Errorf("A failed but returned LockID %q", aResp.LockID)
 	}
-	if err := ssd.client.VerifyLock(ctx, "default", aResp.LockID); err != nil {
-		t.Errorf("A's retry did not become the tag holder (%v); scenario changed", err)
+	if !strings.Contains(aResp.Diagnostics[0].Detail(), "rival") {
+		t.Errorf("A's diagnostic does not name the rival holder: %q", aResp.Diagnostics[0].Detail())
 	}
-	if err := ssd.client.VerifyLock(ctx, "default", bResp.LockID); err == nil {
-		t.Error("B's lock tag survived A's blind retry; retry blindness has been FIXED — update this LIMITATION")
+	if len(ssd.lockIDs) != 0 {
+		t.Errorf("failed lock registered locally: %v", ssd.lockIDs)
+	}
+	if err := ssd.client.VerifyLock(ctx, "default", "rival"); err != nil {
+		t.Errorf("rival no longer holds the lock: %v", err)
+	}
+	mu.Lock()
+	puts := lockPuts
+	mu.Unlock()
+	if puts != 1 {
+		t.Errorf("lock-tag PUT calls = %d, want exactly 1 (A's publication must not be re-applied)", puts)
+	}
+	if !reg.HasTag(testLockTag) {
+		t.Error("lock tag missing after rival acquisition")
 	}
 }
 
@@ -1039,47 +1081,60 @@ func diffTags(all, sub []string) []string {
 	return out
 }
 
-// ─── 14. State-retry-blind LIMITATION: retried Put clobbers a newer write ─────
+// ─── 14. State-tag retry: fail closed on a newer write (regression guard) ─────
 
-// TestStateStoreStateRetryBlindOverwriteLimitation — LIMITATION (Gate 3
-// MEDIUM gap), mirroring TestStateStoreRetryBlindLockTagLimitation for the
-// STATE tag: the Put path (internal/oras client.go Put, operation-level retry
-// wrapper around wc.put) retries blindly. A's first state-tag PUT gets a
-// transient 500; while A sits in the 1s retry backoff, B (-lock=false, separate
-// instance, no local registration) writes a NEWER payload successfully; A's
-// retry then re-runs put (re-push + re-tag) OVER B's newer state — with NO lock
-// re-verification, because VerifyLock ran only once before the first Put.
-// This extends the verify→Put TOCTOU window of Test 9 across retries.
-//
-// GREEN PROVES THE HOLE: the honest assertions are that BOTH writes report
-// success AND the final Read returns A's payload (A's stale retry clobbered B).
-// What the test proves is that the overwrite happens in this injected
-// scenario; the claim that the retry has no ownership re-verification is
-// established by source inspection (client.go:262-269 re-runs wc.put without
-// re-verifying), not proven by this test passing. If this test fails,
-// re-evaluate the documented behavior and the LIMITATION note. If instead
-// A's retry is refused (scenario changed), the assertions below fail with an
-// explicit message.
-// Layer: fake-only (transient injection hook; sequential verification).
-func TestStateStoreStateRetryBlindOverwriteLimitation(t *testing.T) {
+// TestStateStoreStateRetryFailClosed — Property (positive regression guard;
+// replaces the former TestStateStoreStateRetryBlindOverwriteLimitation
+// green-hole test after the mutable-tag retry-safety change): A's first
+// state-tag PUT gets a transient 500; while A observes the tag (hook blocks
+// A's first post-failure state-tag read), B (-lock=false, separate instance,
+// no local registration) writes a NEWER payload through the real Put flow;
+// A's observation then sees a foreign digest and A FAILS CLOSED with an
+// actionable diagnostic instead of re-pushing/re-tagging over B's newer
+// state. Final state remains B's payload. The ordinary W1 verify→Put window
+// (Test 9) and the TTL-expiry-during-write window (Test 12) are unaffected.
+// Layer: fake-only (transient injection + observation gate; sequential
+// verification).
+func TestStateStoreStateRetryFailClosed(t *testing.T) {
 	ctx := context.Background()
 
 	var mu sync.Mutex
 	statePuts := 0
+	stateTagReads := 0 // HEAD/GET on the state tag after the first PUT failed
+	firstPutFailed := false
 	firstRejected := make(chan struct{}, 1)
+	observing := make(chan struct{}, 1)
+	release := make(chan struct{})
 	gate := func(r *http.Request) (<-chan struct{}, int) {
-		if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/manifests/state-default") {
-			mu.Lock()
+		isStateTag := strings.HasSuffix(r.URL.Path, "/manifests/state-default")
+		if !isStateTag {
+			return nil, 0
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.Method {
+		case http.MethodPut:
 			statePuts++
-			n := statePuts
-			mu.Unlock()
-			if n == 1 {
-				// Transient 500: A treats this as retryable and backs off 1s.
+			if statePuts == 1 {
+				firstPutFailed = true
 				select {
 				case firstRejected <- struct{}{}:
 				default:
 				}
+				// Transient 500: A must observe, not blind-retry.
 				return nil, http.StatusInternalServerError
+			}
+		case http.MethodHead, http.MethodGet:
+			if firstPutFailed {
+				stateTagReads++
+				if stateTagReads == 1 {
+					// Park A's post-failure observation of the tag.
+					select {
+					case observing <- struct{}{}:
+					default:
+					}
+					return release, 0
+				}
 			}
 		}
 		return nil, 0
@@ -1105,50 +1160,229 @@ func TestStateStoreStateRetryBlindOverwriteLimitation(t *testing.T) {
 		aWriter.Write(ctx, fwss.WriteRequest{StateID: "default", StateBytes: []byte("payload-a")}, aResp)
 	}()
 
-	// Attempt 1 rejected; A now sits in its 1s put-retry backoff.
+	// A's first state-tag PUT was rejected; A is parked observing the tag.
 	waitSignal(t, firstRejected, "A's first state-tag PUT rejection")
+	waitSignal(t, observing, "A's parked observation of the state tag")
 
-	// In the gap, B writes a newer state through the -lock=false path.
+	// While A observes, B writes a newer state through the -lock=false path.
 	bResp := &fwss.WriteResponse{}
 	bWriter.Write(ctx, fwss.WriteRequest{StateID: "default", StateBytes: []byte("payload-b")}, bResp)
 	if bResp.Diagnostics.HasError() {
-		t.Fatalf("B write in retry gap: %v", bResp.Diagnostics)
+		t.Fatalf("B write in the observation gap: %v", bResp.Diagnostics)
 	}
 
-	// B's write had fully landed before A's retry fires.
+	// B's write had fully landed before A's observation resumes.
 	preResp := &fwss.ReadResponse{}
 	bWriter.Read(ctx, fwss.ReadRequest{StateID: "default"}, preResp)
 	if preResp.Diagnostics.HasError() {
-		t.Fatalf("pre-retry read: %v", preResp.Diagnostics)
+		t.Fatalf("pre-resume read: %v", preResp.Diagnostics)
 	}
 	if string(preResp.StateBytes) != "payload-b" {
-		t.Fatalf("pre-retry read = %q, want %q; hook scenario changed", preResp.StateBytes, "payload-b")
+		t.Fatalf("pre-resume read = %q, want %q; hook scenario changed", preResp.StateBytes, "payload-b")
 	}
 
-	// A's blind retry re-runs put over B's newer state.
+	// Release A's observation: it must see B's digest and fail closed.
+	close(release)
 	waitGroup(t, &wg)
 
-	// Honest LIMITATION assertions: BOTH writes succeed and A's stale retry
-	// is the final state — the retry never re-verified the lock.
-	if aResp.Diagnostics.HasError() {
-		t.Fatalf("A's retried put failed; the state retry may re-verify ownership — update this LIMITATION: %v", aResp.Diagnostics)
+	// Fail-closed assertions: A loses, B's newer state remains.
+	if !aResp.Diagnostics.HasError() {
+		t.Fatalf("A's write succeeded over B's newer state; the publication must fail closed after an ambiguous retry — update this regression guard")
 	}
-	if bResp.Diagnostics.HasError() {
-		t.Fatalf("B write reported failure; scenario changed: %v", bResp.Diagnostics)
+	if !strings.Contains(aResp.Diagnostics[0].Summary(), "publication conflict") {
+		t.Errorf("A's diagnostic summary = %q, want the actionable fail-closed diagnostic", aResp.Diagnostics[0].Summary())
 	}
 	finalResp := &fwss.ReadResponse{}
 	aWriter.Read(ctx, fwss.ReadRequest{StateID: "default"}, finalResp)
 	if finalResp.Diagnostics.HasError() {
 		t.Fatalf("final read: %v", finalResp.Diagnostics)
 	}
-	if string(finalResp.StateBytes) != "payload-a" {
-		t.Errorf("final state = %q, want %q (A's stale retry must clobber B); retry may re-verify now — update this LIMITATION", finalResp.StateBytes, "payload-a")
+	if string(finalResp.StateBytes) != "payload-b" {
+		t.Errorf("final state = %q, want %q (A must not overwrite B's newer write)", finalResp.StateBytes, "payload-b")
 	}
 	// A's registration must be intact throughout (B never registered).
-	if got := ssd.lockIDs["default"]; got != lockResp.LockID {
-		t.Errorf("A's registration = %q, want %q; B's write must not touch the registry", got, lockResp.LockID)
+	if id, ok := ssd.lockFor("default"); !ok || id != lockResp.LockID {
+		t.Errorf("A's registration = (%q, %v), want (%q, true); B's write must not touch the registry", id, ok, lockResp.LockID)
+	}
+	mu.Lock()
+	puts := statePuts
+	mu.Unlock()
+	if puts != 2 {
+		t.Errorf("state-tag PUT calls = %d, want exactly 2 (A's rejected attempt + B's write); A must not re-apply", puts)
 	}
 	if !reg.HasTag("state-default") {
-		t.Error("state tag missing after both writes")
+		t.Error("state tag missing after B's write")
+	}
+}
+
+// ─── 15. Partial version publication: state lands, version tag fails closed ──
+
+// TestStateStorePartialVersionPublicationFailClosed — Property (Gate 2 #2):
+// with max_versions > 0, when the state tag publishes successfully but the
+// version-tag publication hits a transient failure and then a foreign digest,
+// the Write must report a PARTIAL failure ("State version publication failed")
+// — NOT a whole-write rejection — and the published state must remain
+// readable. The failed version tag is never re-applied (false-failure
+// preference: it may belong to a rival claiming the same version number).
+// Layer: distributed + fake-only (transient injection + observation gate).
+func TestStateStorePartialVersionPublicationFailClosed(t *testing.T) {
+	ctx := context.Background()
+
+	const versionTag = "stver-default-v1"
+	var mu sync.Mutex
+	versionPuts := 0
+	versionTagReads := 0
+	versionTagFailed := false
+	firstRejected := make(chan struct{}, 1)
+	observing := make(chan struct{}, 1)
+	release := make(chan struct{})
+	gate := func(r *http.Request) (<-chan struct{}, int) {
+		if !strings.HasSuffix(r.URL.Path, "/manifests/"+versionTag) {
+			return nil, 0
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.Method {
+		case http.MethodPut:
+			versionPuts++
+			if versionPuts == 1 {
+				versionTagFailed = true
+				select {
+				case firstRejected <- struct{}{}:
+				default:
+				}
+				// Transient 500 on the FIRST version-tag publication.
+				return nil, http.StatusInternalServerError
+			}
+		case http.MethodHead, http.MethodGet:
+			if versionTagFailed {
+				versionTagReads++
+				if versionTagReads == 1 {
+					// Park the post-failure observation of the version tag.
+					select {
+					case observing <- struct{}{}:
+					default:
+					}
+					return release, 0
+				}
+			}
+		}
+		return nil, 0
+	}
+	reg, baseURL := newConcurrencyRegistry(t, gate)
+	_, ssd := newConfiguredStore(t, "", baseURL, 3)
+	writer := testNewInstance(t, ssd)
+
+	writeResp := &fwss.WriteResponse{}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		writer.Write(ctx, fwss.WriteRequest{StateID: "default", StateBytes: []byte("partial-payload")}, writeResp)
+	}()
+
+	// The version tag PUT was rejected; the writer is parked observing it.
+	waitSignal(t, firstRejected, "first version-tag PUT rejection")
+	waitSignal(t, observing, "parked observation of the version tag")
+
+	// The state tag already published successfully while the version tag
+	// publication is ambiguous: the state must be readable NOW.
+	preResp := &fwss.ReadResponse{}
+	writer.Read(ctx, fwss.ReadRequest{StateID: "default"}, preResp)
+	if preResp.Diagnostics.HasError() {
+		t.Fatalf("pre-resume read: %v", preResp.Diagnostics)
+	}
+	if string(preResp.StateBytes) != "partial-payload" {
+		t.Fatalf("pre-resume read = %q, want %q; hook scenario changed", preResp.StateBytes, "partial-payload")
+	}
+
+	// A rival claims the version tag while the observation is parked.
+	rivalBody := rivalLockManifest(t, "rival-version")
+	reg.TagManifest(versionTag, rivalBody)
+
+	// Release: the writer observes a foreign digest → fail closed, and the
+	// publication must surface as PARTIAL (state visible, version failed).
+	close(release)
+	waitGroup(t, &wg)
+
+	if !writeResp.Diagnostics.HasError() {
+		t.Fatal("version-tag conflict did not surface any diagnostic")
+	}
+	if !strings.Contains(writeResp.Diagnostics[0].Summary(), "State version publication failed") {
+		t.Errorf("summary = %q, want the actionable partial-publication diagnostic", writeResp.Diagnostics[0].Summary())
+	}
+	if strings.Contains(writeResp.Diagnostics[0].Summary(), "Failed to write state") {
+		t.Errorf("summary = %q: a partial publication must not be reported as a whole-write rejection", writeResp.Diagnostics[0].Summary())
+	}
+	detail := writeResp.Diagnostics[0].Detail()
+	if !strings.Contains(detail, "state-default") || !strings.Contains(detail, versionTag) {
+		t.Errorf("detail = %q, want it to name both the published state tag and the failed version tag", detail)
+	}
+
+	// The state remains readable after the partial failure.
+	finalResp := &fwss.ReadResponse{}
+	writer.Read(ctx, fwss.ReadRequest{StateID: "default"}, finalResp)
+	if finalResp.Diagnostics.HasError() {
+		t.Fatalf("final read: %v", finalResp.Diagnostics)
+	}
+	if string(finalResp.StateBytes) != "partial-payload" {
+		t.Errorf("final state = %q, want %q (state must stay visible)", finalResp.StateBytes, "partial-payload")
+	}
+
+	// The version tag belongs to the rival: the failed publication was never
+	// re-applied over it.
+	mu.Lock()
+	puts := versionPuts
+	mu.Unlock()
+	if puts != 1 {
+		t.Errorf("version-tag PUT calls = %d, want exactly 1 (no re-apply after a transient/foreign outcome)", puts)
+	}
+	reg.mu.Lock()
+	dgst := reg.tagOf[versionTag]
+	reg.mu.Unlock()
+	wantDigest := "sha256:" + hex.EncodeToString(hashBytes(rivalBody))
+	if dgst != wantDigest {
+		t.Errorf("version tag digest = %q, want the rival's %q (foreign tag must be preserved)", dgst, wantDigest)
+	}
+}
+
+// ─── 16. VerifyLock interruption: context cancellation before lost-lock ──────
+
+// TestStateStoreWriteVerifyLockInterrupted — Property (Gate 2 #3): when the
+// pre-write VerifyLock fails because the operation was interrupted
+// (context cancelled), the diagnostic must be the interruption style
+// ("State write interrupted"), NOT "State lock no longer held" — the
+// ownership could not be evaluated, so a lost-lock claim would be false.
+// Layer: logical (diagnostic mapping, deterministic via a cancelled context).
+func TestStateStoreWriteVerifyLockInterrupted(t *testing.T) {
+	ctx := context.Background()
+	_, _, ssd := newTestStore(t)
+
+	locker := testNewInstance(t, ssd)
+	lockResp := &fwss.LockResponse{}
+	locker.Lock(ctx, fwss.LockRequest{StateID: "default", Operation: "apply"}, lockResp)
+	if lockResp.Diagnostics.HasError() {
+		t.Fatalf("lock: %v", lockResp.Diagnostics)
+	}
+
+	writer := testNewInstance(t, ssd)
+	interrupted, cancel := context.WithCancel(ctx)
+	cancel() // cancelled before the VerifyLock can run
+
+	writeResp := &fwss.WriteResponse{}
+	writer.Write(interrupted, fwss.WriteRequest{StateID: "default", StateBytes: []byte("never-written")}, writeResp)
+	if !writeResp.Diagnostics.HasError() {
+		t.Fatal("write with a cancelled context reported no diagnostic")
+	}
+	summary := writeResp.Diagnostics[0].Summary()
+	if !strings.Contains(summary, "interrupted") {
+		t.Errorf("summary = %q, want the interruption diagnostic", summary)
+	}
+	if strings.Contains(summary, "no longer held") {
+		t.Errorf("summary = %q: a cancelled ownership check must not be framed as a lost lock", summary)
+	}
+	// The cancelled write must not register or drop anything.
+	if id, ok := ssd.lockFor("default"); !ok || id != lockResp.LockID {
+		t.Errorf("registration = (%q, %v), want the lock preserved", id, ok)
 	}
 }

@@ -155,7 +155,7 @@ one tag+verify attempt** (transport-level retries only):
    held & stale (TTL>0)     → clearLock           (430, 911-922)
 3. generation = prev + 1                          (436-439)
    lease = now + TTL iff TTL > 0                   (441-444)
-4. tag lock manifest, w/ retry                    (457-465)
+4. publish lock tag via publishMutableTag          (457-465)
 5. post-verify: re-read, check gen + holder       (494-507)
    → mismatch: report contention; cleanupOurTag
      (digest-guarded delete / 405→retagToUnlocked,
@@ -169,16 +169,21 @@ The 100 ms `lockStabilityDelay` is a **fixed, unconfigurable constant**
 (`client.go:66`) — a mitigation that narrows the late-rival window; it cannot
 close it (residual window after the re-read is unbounded).
 
-**Blind lock-tag retry.** The lock-tag PUT is wrapped in `retry`
-(`client.go:457-465`; 3 attempts, 1s/2s backoff). A retried attempt re-runs
-the plain tag PUT **without re-reading the lock tag, re-checking the
-generation, or conditioning on the current holder**. A rival that acquires
-through the normal Lock flow during the retry backoff is silently clobbered
-by the retried tag — and the subsequent post-verify and stability re-read
-then *pass*, because the tag points at the retrier's own manifest. This is a
-documented hole, not a fixed one
-(`TestStateStoreRetryBlindLockTagLimitation`, fake-only; GREEN PROVES THE
-HOLE — see §15).
+**Observed (not blind) lock-tag retry.** The lock-tag publication goes
+through `publishMutableTag` (`client.go`): the initial Tag PUT proceeds
+normally; on a **transient** failure the helper **observes** the tag before
+ever re-tagging — own digest ⇒ response-lost publication confirmed (success,
+no second Tag); foreign digest ⇒ `ErrMutableTagMoved` mapped to a
+`*LockError{holder}` contention diagnostic, no re-tag; absent tag ⇒ fail
+closed (a Resolve(404)→Tag reapply is itself a clobber window); ambiguous
+(transient resolve error or bound exhausted) ⇒ fail closed. This is NOT CAS —
+the W1/W5 windows below are unchanged — it only prevents a blind re-application
+after an ambiguous mutable-tag result
+(`TestStateStoreLockTagRetryFailClosed`, regression guard since the
+retry-safety change). **Scope:** the observed-publication guarantee applies to
+FOREGROUND state/version publication only; asynchronous retention retags
+(`retagToNewManifest`, §11) remain raw last-writer-wins and are out of scope
+for this guarantee.
 
 ## 8. Release
 
@@ -219,10 +224,23 @@ rival acquires the lock.
 
 All verify→write windows are non-atomic (tags are mutable, unordered, plain
 PUTs). Additionally, `Write` verifies ownership **once, before the first Put
-attempt** (`oci.go:341-353`); the operation-level retry around Put
-(`client.go:262-269`) re-runs push+tag blindly and does **not** re-verify
-ownership between attempts — a retried state Put can overwrite a newer write
-(`TestStateStoreStateRetryBlindOverwriteLimitation`). Enumerated (window IDs
+attempt** (`oci.go:341-353`); the Put path keeps that property: content-addressed
+steps are retried with one stable manifest digest, but the mutable state/version
+tag publication is **observed, not blind** — a transient tag failure fails
+closed on a foreign/ambiguous/absent tag (`ErrMutableTagMoved` → actionable
+"State publication conflict" diagnostic in `oci.go`) instead of re-running the
+whole `put` with a fresh timestamp/digest. If the state tag published but the
+VERSION tag publication fails/conflicts, the write reports a **partial
+publication** (`*oras.PartialPublicationError` → "State version publication
+failed" diagnostic stating the state is already visible; the failed version
+tag is left untouched). The retried publication is still not ownership-checked
+(no VerifyLock inside the publication), so the W1 TOCTOU below is unchanged;
+what changed is that an ambiguous transient result can no longer be blindly
+re-applied over a newer write
+(`TestStateStoreStateRetryFailClosed`,
+`TestStateStorePartialVersionPublicationFailClosed`). **Scope:** foreground
+state/version publication only; async retention retags remain raw LWW.
+Enumerated (window IDs
 `[W1]`–`[W5]` are referenced by §17's sequence diagram):
 
 | Window | Where | Outcome if a rival moves in between |
@@ -231,7 +249,7 @@ ownership between attempts — a retried state Put can overwrite a newer write
 | [W2] Lock read → clearLock → tag | `client.go:415` → 430 → 457 | Rival re-locks in between |
 | [W3] Retag preflight Resolve → `Tag` | `client.go:951` → 959 | Rival re-locks after the check |
 | [W4] Retention tag list → digest grouping → enforce | `client.go:338` → 763 → 744-789 (404 skip: 803-809) | Tags left for a later prune; gone tags skipped |
-| [W5] Lock tag retry → post-verify → stability re-read | `client.go:457` → 494 → 526 | Rival wins just after the final read (F1) |
+| [W5] Lock tag publication → post-verify → stability re-read | `client.go` publishMutableTag → 494 → 526 | Rival wins just after the final read (F1); window unclosed |
 
 ## 11. Retention / pruning
 
@@ -268,14 +286,18 @@ ownership between attempts — a retried state Put can overwrite a newer write
 - Transient failures retry **3 attempts, 1s then 2s backoff**, with
   context cancellation preserved (`client.go:1196-1277`). Idempotency classes:
   - `PushBytes`: content-addressed ⇒ idempotent.
-  - `Tag`: re-tagging the same digest idempotent. Retries are **blind**:
-    a retried conflicting **lock** tag silently clobbers a rival that
-    acquired during the backoff — undetected, because post-verify and the
-    stability re-read then see the retrier's own manifest (§7, F10,
-    `TestStateStoreRetryBlindLockTagLimitation`); a retried conflicting
-    **state** tag overwrites a newer write — never detected, and ownership
-    is verified only before the *first* attempt, never between retries
-    (§10, F10).
+  - `Tag`: re-tagging the same digest is idempotent, but **mutable-tag
+    publications are no longer retried blindly**: `publishMutableTag`
+    observes the tag after a transient failure — own digest ⇒ response-lost
+    success, foreign digest ⇒ fail closed (`ErrMutableTagMoved`), absent tag
+    ⇒ fail closed (no Resolve(404)→Tag reapply: that is itself a clobber
+    window), ambiguous ⇒ fail closed (§7, §10, F10,
+    `TestStateStoreLockTagRetryFailClosed`,
+    `TestStateStoreStateRetryFailClosed`). The same helper covers version-tag
+    publication, so a foreign version tag is never retagged; a version-tag
+    failure after a successful state publication surfaces as a PARTIAL
+    publication error. **Scope:** foreground state/version publication only;
+    async retention retags (`retagToNewManifest`) remain raw LWW.
   - `Delete`: 404 treated as success ⇒ idempotent.
 - Operations without a caller deadline get a 10-minute default timeout
   (`client.go:180,184-189`).
@@ -332,7 +354,7 @@ first definition, grouped here by operation rather than renumbered.
 | F6 | Write while holding locally-known lock | lockFor → VerifyLock → Put; passes only if the registry tag still points at the holder | `oci.go:341-353` |
 | F7 | Ownership change between verify and write | VerifyLock → Put is **not atomic**; rival retags in between ⇒ silent last-writer-wins | `oci.go:343,353` |
 | F8 | `-lock=false` | No Lock call ⇒ no registration ⇒ VerifyLock skipped ⇒ unverified Put | `oci.go:341-351` |
-| F10 | Mutation applied, response lost | PushBytes idempotent (content-addressed); same-digest Tag idempotent; **retries are blind**: a retried **lock**-tag PUT clobbers a rival that acquired during the 1s/2s backoff and is *not* detected (post-verify then sees the retrier's own manifest — not "resolved post-hoc"); a retried **state**-tag PUT overwrites a newer write with no re-verification (ownership checked only before the first attempt, `oci.go:341-353`); Delete 404-as-success; 3× retry, 1s/2s | `client.go:457-465,1196-1277`; `TestStateStoreRetryBlindLockTagLimitation`, `TestStateStoreStateRetryBlindOverwriteLimitation` |
+| F10 | Mutation applied, response lost | PushBytes idempotent (content-addressed); same-digest Tag idempotent; mutable-tag publications go through **observed retry** (`publishMutableTag`): a transient result is followed by observation — own digest ⇒ success without a second Tag, foreign digest ⇒ fail closed (`ErrMutableTagMoved`; lock tag maps to a `*LockError{holder}` contention diagnostic, state tag to an actionable "State publication conflict" diagnostic), absent tag ⇒ fail closed (no Resolve(404)→Tag reapply), ambiguous ⇒ fail closed (conservative: false failure preferred over overwriting a possibly newer state); a version-tag failure after a successful state publication ⇒ `*PartialPublicationError` ("State version publication failed", state stays visible, foreign version tag untouched); Delete 404-as-success; transport retries 3×, 1s/2s for reads/pushes only. NOT CAS: W1/W5 windows unchanged. **Scope:** foreground state/version publication only; async retention retags remain raw LWW | `client.go` publishMutableTag/observeMutableTag, `oci.go` Write; `TestStateStoreLockTagRetryFailClosed`, `TestStateStoreStateRetryFailClosed`, `TestStateStorePartialVersionPublicationFailClosed`, `internal/oras/mutabletag_test.go` |
 
 **Unlock**
 
@@ -378,7 +400,7 @@ Lock (§7)
   1. GET  lock tag          → gen X, holder (or 404)        client.go:415-422
   2. held & not stale       → contention error              client.go:427-429
      held & stale (TTL > 0) → clearLock, continue           client.go:430,911-922
-  3. PUT  lock manifest     → gen X+1, plain tag PUT        client.go:457-465
+  3. PUT  lock manifest     → observed publication           client.go publishMutableTag
       [W2] rival PUT between the clear and this tag can win
   4. GET  re-read           → gen/holder must be ours       client.go:494-507
   5. wait 100 ms, re-read   → digest/gen/holder must be ours client.go:515-539
