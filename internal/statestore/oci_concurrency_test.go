@@ -20,19 +20,19 @@
 // 100ms lockStabilityDelay is tolerated with generous 30s test timeouts.
 //
 // Limitation tests are green-proves-hole only where the hole is real and
-// open: the W1 verify→Put window (Test 9) and the TTL-expiry-during-write
-// window (Test 12) — both documented in ADR-0001
+// open: the W1 verify→Put window (Test 9) and the expiry-during-W1 window
+// (Test 18: verification passes before stored-lease expiry, expiry occurs
+// during the in-flight Put, bytes still land) — both documented in ADR-0001
 // (.agents/decisions/0001-locking-model.md) and both must fail if the window
-// is ever closed. The former retry-blind tests (Tests 11/14) were converted
-// into positive regression guards after the mutable-tag retry-safety change
-// (internal/oras publishMutableTag): an injected transient publication
-// failure now fails closed instead of blindly re-applying, so Tests 11/14
-// assert fail-closed behavior, not a residual hole. Scope: the observed
-// publication guarantees apply to FOREGROUND state/version publication only
-// (including the partial "state lands, version tag fails closed" case of
-// Test 15); asynchronous retention retags (retagToNewManifest) remain raw
-// last-writer-wins — no claim is made that ALL version-tag writes are
-// protected.
+// is ever closed. The former retry-blind tests (Tests 11/14) and the former
+// TTL-expiry-during-write test (Test 12) were converted into positive
+// regression guards: Tests 11/14 assert fail-closed retry behavior
+// (internal/oras publishMutableTag) and Test 12 asserts stored-lease refusal
+// at VerifyLock (Fase D). Scope of the observed publication guarantees:
+// FOREGROUND state/version publication only (including the partial "state
+// lands, version tag fails closed" case of Test 15); asynchronous retention
+// retags (retagToNewManifest) remain raw last-writer-wins — no claim is made
+// that ALL version-tag writes are protected.
 package statestore
 
 import (
@@ -378,10 +378,14 @@ func TestStateStoreLockWriteReadRoundTrip(t *testing.T) {
 // TestStateStoreTTLExpiryTakeover — Property (issue #28 I4): with a short
 // lock_ttl, a lock whose lease expired is stale; the next contender must win
 // via the real stale-clear path (not a direct tag install) and must then be
-// able to write. Layer: distributed (TTL staleness + clearLock on the fake).
+// able to write while its OWN lease is still valid. The TTL must exceed the
+// ~100ms lockStabilityDelay inside acquisition: post-Fase-D, VerifyLock
+// refuses a holder whose STORED lease has expired, so a too-short TTL (e.g.
+// 1ms) would make every post-acquisition write fail.
+// Layer: distributed (TTL staleness + clearLock + stored-lease VerifyLock).
 func TestStateStoreTTLExpiryTakeover(t *testing.T) {
 	ctx := context.Background()
-	_, _, ssd := newConcurrencyStore(t, "1ms", nil)
+	_, _, ssd := newConcurrencyStore(t, "1s", nil)
 
 	a := testNewInstance(t, ssd)
 	aResp := &fwss.LockResponse{}
@@ -390,10 +394,10 @@ func TestStateStoreTTLExpiryTakeover(t *testing.T) {
 		t.Fatalf("A lock: %v", aResp.Diagnostics)
 	}
 
-	// Expiry is wall-clock based: wait out the 1ms lease (100× TTL margin).
-	// (The one tolerated sleep in the non-limitation tests; expiry cannot be
-	// channel-driven.)
-	time.Sleep(100 * time.Millisecond)
+	// Expiry is wall-clock based: wait out A's 1s lease (1.1× TTL margin).
+	// (Expiry cannot be channel-driven; the sleep is the tolerated
+	// wall-clock wait for actual expiry.)
+	time.Sleep(1100 * time.Millisecond)
 
 	b := testNewInstance(t, ssd)
 	bResp := &fwss.LockResponse{}
@@ -405,6 +409,7 @@ func TestStateStoreTTLExpiryTakeover(t *testing.T) {
 		t.Fatal("B acquired A's lock ID; takeover did not mint a new holder")
 	}
 
+	// B writes immediately, within its own (just-acquired) lease.
 	writeResp := &fwss.WriteResponse{}
 	b.Write(ctx, fwss.WriteRequest{StateID: "default", StateBytes: []byte("after-takeover")}, writeResp)
 	if writeResp.Diagnostics.HasError() {
@@ -477,8 +482,11 @@ func TestStateStoreStaleWriteRefused(t *testing.T) {
 func TestStateStoreStaleUnlockAfterTakeover(t *testing.T) {
 	ctx := context.Background()
 	reg, baseURL := newConcurrencyRegistry(t, nil)
-	_, ssdA := newConfiguredStore(t, "50ms", baseURL, 0)
-	_, ssdB := newConfiguredStore(t, "50ms", baseURL, 0)
+	// TTL must exceed the ~100ms acquisition delay so B's OWN stored lease is
+	// still valid when we later VerifyLock B's holder (Fase D enforces stored
+	// expiry at VerifyLock); 1s gives a comfortable margin.
+	_, ssdA := newConfiguredStore(t, "1s", baseURL, 0)
+	_, ssdB := newConfiguredStore(t, "1s", baseURL, 0)
 
 	a := testNewInstance(t, ssdA)
 	aResp := &fwss.LockResponse{}
@@ -487,9 +495,9 @@ func TestStateStoreStaleUnlockAfterTakeover(t *testing.T) {
 		t.Fatalf("A lock: %v", aResp.Diagnostics)
 	}
 
-	// Let A's lease expire (10× TTL margin), then B takes over through the
+	// Let A's lease expire (1.1× TTL margin), then B takes over through the
 	// stale-clear path.
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(1100 * time.Millisecond)
 	b := testNewInstance(t, ssdB)
 	bResp := &fwss.LockResponse{}
 	b.Lock(ctx, fwss.LockRequest{StateID: "default", Operation: "apply"}, bResp)
@@ -912,19 +920,19 @@ func TestStateStoreLockTagRetryFailClosed(t *testing.T) {
 	}
 }
 
-// ─── 12. TTL-expiry-during-write LIMITATION ───────────────────────────────────
+// ─── 12. Stored-lease expiry: stale holder refused at VerifyLock ──────────────
 
-// TestStateStoreTTLExpiryDuringWriteLimitation — LIMITATION (Gate1 #4):
-// TTL expiry makes a lock CLEARABLE by rivals but does NOT invalidate the
-// holder: VerifyLock compares holder IDs only and ignores LeaseExpiry
-// (ADR-0001). So a holder whose lease has expired can still write successfully
-// until some rival actually takes over. This test sleeps past expiry (a
-// time-based sleep — expiry itself is wall-clock), asserts the expired-lease
-// write LANDS, then shows a real takeover ends it. A and B are separate client
-// configurations (separate lock registries) so B's takeover cannot overwrite
-// A's local registration. GREEN PROVES THE HOLE.
-// Layer: distributed + fake-only (time-based staleness).
-func TestStateStoreTTLExpiryDuringWriteLimitation(t *testing.T) {
+// TestStateStoreTTLExpiryRefusesStaleWrite — Property (positive regression
+// guard, Fase D; replaces the former TestStateStoreTTLExpiryDuringWriteLimitation
+// green-hole test): after A's STORED lease expires, A's Write is refused at
+// VerifyLock (holder matches, but the manifest's own lease_expiry is past the
+// verifier's clock), and NO state bytes land. The stored expiry governs — the
+// verifier's configured LockTTL is irrelevant to the check. The residual
+// window (verification passing BEFORE expiry, expiry occurring during the
+// in-flight Put) is separately covered by Test 18
+// (TestStateStoreWriteExpiryDuringW1Limitation) and stays green-proves-hole.
+// Layer: distributed + fake-only (time-based stored staleness).
+func TestStateStoreTTLExpiryRefusesStaleWrite(t *testing.T) {
 	ctx := context.Background()
 	reg, baseURL := newConcurrencyRegistry(t, nil)
 	_, ssdA := newConfiguredStore(t, "50ms", baseURL, 0)
@@ -939,37 +947,44 @@ func TestStateStoreTTLExpiryDuringWriteLimitation(t *testing.T) {
 		t.Fatalf("A lock: %v", aResp.Diagnostics)
 	}
 
-	// Sleep past the 50ms lease (10× TTL margin). The lease is now expired
-	// for everyone, but A is still the tag holder.
-	time.Sleep(500 * time.Millisecond)
+	// Sleep past the 50ms stored lease (10× TTL margin). The lease is now
+	// expired for everyone, but A is still the tag holder.
+	time.Sleep(200 * time.Millisecond)
 
-	// A writes past its own expiry: VerifyLock ignores LeaseExpiry → passes.
+	// A writes past its own expiry: VerifyLock must refuse at the stored
+	// lease — no state bytes may land.
 	writeResp := &fwss.WriteResponse{}
 	aWriter.Write(ctx, fwss.WriteRequest{StateID: "default", StateBytes: []byte("expired-lease-write")}, writeResp)
-	if writeResp.Diagnostics.HasError() {
-		t.Fatalf("expired-lease write was refused; TTL hole may be fixed — update the LIMITATION: %v", writeResp.Diagnostics)
+	if !writeResp.Diagnostics.HasError() {
+		t.Fatal("expired-lease write was accepted; stored-lease enforcement has regressed — update this regression guard")
 	}
-	readResp := &fwss.ReadResponse{}
-	aWriter.Read(ctx, fwss.ReadRequest{StateID: "default"}, readResp)
-	if readResp.Diagnostics.HasError() {
-		t.Fatalf("read: %v", readResp.Diagnostics)
+	if !strings.Contains(writeResp.Diagnostics[0].Summary(), "no longer held") {
+		t.Errorf("summary = %q, want the lost-lock framing", writeResp.Diagnostics[0].Summary())
 	}
-	if string(readResp.StateBytes) != "expired-lease-write" {
-		t.Errorf("stale write did not land: read = %q", readResp.StateBytes)
+	if !strings.Contains(writeResp.Diagnostics[0].Detail(), "expired") {
+		t.Errorf("detail = %q, want it to name the expired stored lease", writeResp.Diagnostics[0].Detail())
+	}
+	if reg.HasTag("state-default") {
+		t.Error("state bytes landed despite an expired stored lease")
+	}
+	// A's local registration must survive the refused write.
+	if id, ok := ssdA.lockFor("default"); !ok || id != aResp.LockID {
+		t.Errorf("A's registration = (%q, %v), want (%q, true) preserved", id, ok, aResp.LockID)
 	}
 
 	// A rival's real takeover is what finally stops A: B is a separate client
-	// configuration whose Lock sees A's lease as stale and clears it.
+	// configuration whose Lock sees A's stored lease as stale and clears it.
+	// (B does not write here: with a 50ms TTL its own lease also expires
+	// during acquisition — write-within-lease after takeover is covered by
+	// Test 4 with a 1s TTL.)
 	b := testNewInstance(t, ssdB)
 	bResp := &fwss.LockResponse{}
 	b.Lock(ctx, fwss.LockRequest{StateID: "default", Operation: "apply"}, bResp)
 	if bResp.Diagnostics.HasError() {
 		t.Fatalf("B takeover: %v", bResp.Diagnostics)
 	}
-	writeResp2 := &fwss.WriteResponse{}
-	aWriter.Write(ctx, fwss.WriteRequest{StateID: "default", StateBytes: []byte("post-takeover")}, writeResp2)
-	if !writeResp2.Diagnostics.HasError() {
-		t.Error("A wrote after a rival took over; expected refusal")
+	if bResp.LockID == aResp.LockID {
+		t.Error("B acquired A's lock ID; takeover did not mint a new holder")
 	}
 	if !reg.HasTag(testLockTag) {
 		t.Error("lock tag missing after B's takeover")
@@ -1476,5 +1491,81 @@ func TestStateStoreConcurrentFwssLock(t *testing.T) {
 		if perGroupSuccess[g] != perGroup {
 			t.Errorf("group %d successful locks = %d, want %d", g, perGroupSuccess[g], perGroup)
 		}
+	}
+}
+
+// ─── 18. Expiry-during-W1 LIMITATION: verified-then-expired write still lands ─
+
+// TestStateStoreWriteExpiryDuringW1Limitation — LIMITATION (Fase D; keeps the
+// W1 evidence after the stored-lease enforcement): the stored-lease check
+// (Test 12) runs at VerifyLock. If verification passes BEFORE expiry and the
+// lease expires while the state Put is in flight, the bytes STILL LAND —
+// nothing re-verifies ownership between VerifyLock and the mutable tag
+// publication (W1 unchanged by the TTL hardening; registries do not enforce
+// leases). GREEN PROVES THE HOLE: if this test fails, W1 has been closed for
+// the expiry case and the documentation must be updated.
+// Deterministic sync: A locks with a 500ms stored lease; the state-tag gate
+// parks A's in-flight Put (VerifyLock has already passed, lease still
+// valid); the main goroutine waits out the expiry (the ONE controlled
+// wall-clock wait — expiry itself is time-based) and releases. No rival; the
+// residual is purely verify-then-expire-then-land.
+// Layer: distributed + fake-only (time-based; HTTP gate).
+func TestStateStoreWriteExpiryDuringW1Limitation(t *testing.T) {
+	ctx := context.Background()
+
+	engaged := make(chan struct{}, 1)
+	release := make(chan struct{})
+	gate := func(r *http.Request) (<-chan struct{}, int) {
+		// Park only the state-tag manifest PUT (after VerifyLock passed).
+		if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/manifests/state-default") {
+			select {
+			case engaged <- struct{}{}:
+			default:
+			}
+			return release, 0
+		}
+		return nil, 0
+	}
+	_, reg, ssd := newConcurrencyStore(t, "500ms", gate)
+
+	locker := testNewInstance(t, ssd)
+	lockResp := &fwss.LockResponse{}
+	locker.Lock(ctx, fwss.LockRequest{StateID: "default", Operation: "apply"}, lockResp)
+	if lockResp.Diagnostics.HasError() {
+		t.Fatalf("lock: %v", lockResp.Diagnostics)
+	}
+
+	writer := testNewInstance(t, ssd)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		writer.Write(ctx, fwss.WriteRequest{StateID: "default", StateBytes: []byte("expiry-w1-payload")}, &fwss.WriteResponse{})
+	}()
+
+	// VerifyLock has passed (lease still valid); A's state PUT is parked.
+	waitSignal(t, engaged, "A's parked state-tag PUT")
+
+	// Expiry passes while the verified write is still in flight.
+	time.Sleep(600 * time.Millisecond)
+
+	// Release: nothing re-verifies the (now expired) lease, so the stale
+	// bytes land.
+	close(release)
+	waitGroup(t, &wg)
+
+	readResp := &fwss.ReadResponse{}
+	writer.Read(ctx, fwss.ReadRequest{StateID: "default"}, readResp)
+	if readResp.Diagnostics.HasError() {
+		t.Fatalf("read: %v", readResp.Diagnostics)
+	}
+	if string(readResp.StateBytes) != "expiry-w1-payload" {
+		t.Fatalf("verified-then-expired write did not land: read = %q; W1 may be closed for the expiry case — update the LIMITATION", readResp.StateBytes)
+	}
+	if !reg.HasTag("state-default") {
+		t.Error("state tag missing after the in-flight write landed")
+	}
+	if !reg.HasTag(testLockTag) {
+		t.Error("lock tag missing; hook scenario changed")
 	}
 }

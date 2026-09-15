@@ -223,10 +223,18 @@ Consequences:
 ## 10. Optimistic concurrency semantics
 
 **Best-effort, generation-based; last-writer-wins.** Not atomic CAS — see
-ADR-0001 and §14. `VerifyLock` compares **holder ID only** (`client.go:565-586`):
-it does not check TTL, so TTL expiry makes a lock *clearable by rivals* (§9),
-**not invalid for its holder** — a holder can keep writing past expiry until a
-rival acquires the lock.
+ADR-0001 and §14. `VerifyLock` compares **holder ID**, then enforces the
+manifest's **STORED** `lease_expiry` (`client.go` verifyLock +
+`isStoredLeaseExpired`, Fase D): a positive stored lease already past the
+**verifier's local wall clock** is refused ("lock ... expired"); `LeaseExpiry
+= 0` remains non-expiring; the verifier's own configured `LockTTL` is
+irrelevant to this check (config changes do not alter a stored expiry).
+Takeover staleness (`isLockStale`, §9) remains a separate, config-TTL-based
+check on the next `Lock`. Two hard limits remain: the expiry comparison is
+**local-wall-clock** (holder/rival clock skew is unmodeled) and the check is
+**client-side only** — registries do not enforce leases, and a write verified
+before expiry whose lease expires during the in-flight Put still lands
+(W1 unchanged, `TestStateStoreWriteExpiryDuringW1Limitation`).
 
 All verify→write windows are non-atomic (tags are mutable, unordered, plain
 PUTs). Additionally, `Write` verifies ownership **once, before the first Put
@@ -350,7 +358,7 @@ first definition, grouped here by operation rather than renumbered.
 |---|---|---|---|
 | F1 | Two clients acquire concurrently | Both read gen X, both tag X+1; post-verify and the 100 ms stability re-read detect the loser post-hoc; residual window after re-read unclosed | `client.go:415-422,494-539` |
 | F3 | Expired takeover | Next Lock sees `now > expiry`, clearLock, tags gen+1; requires stored LeaseExpiry > 0 (TTL = 0 never clearable) | `client.go:409-465,901-909` |
-| F4 | Stale owner after takeover | VerifyLock is holder-ID only; pre-takeover holder keeps passing VerifyLock until the rival's tag lands; its later writes fail on ID mismatch | `client.go:565-586` |
+| F4 | Stale owner after takeover / expired lease | VerifyLock checks holder ID, then the STORED lease_expiry (Fase D): after stored expiry the pre-takeover holder is refused at VerifyLock; before expiry it keeps passing VerifyLock until expiry or a rival's tag lands; expiry during an in-flight verified Put still lands (W1) | `client.go` verifyLock/isStoredLeaseExpired; `TestStateStoreTTLExpiryRefusesStaleWrite`, `TestStateStoreWriteExpiryDuringW1Limitation` |
 | F9 | Registry unavailable before op | RPC returns an error diagnostic; Lock maps already-locked vs transport errors distinctly | `oci.go:393-405` |
 
 **Write**

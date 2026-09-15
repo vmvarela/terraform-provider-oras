@@ -630,11 +630,16 @@ func (c *Client) Unlock(ctx context.Context, stateID, lockID string) error {
 }
 
 // VerifyLock reports whether the lock for stateID is still held by lockID: it
-// reads the lock tag and compares the lock holder ID. It returns an error when
-// the lock is gone, held by a different holder, or the check itself fails.
-// There is no CAS on OCI tags, so a caller cannot close the race between a
-// successful VerifyLock and a subsequent Put — this is a best-effort
-// ownership check.
+// reads the lock tag, compares the lock holder ID, and — after the holder
+// matches — rejects a STORED positive lease_expiry already past the
+// verifier's wall clock (the stored expiry governs, NOT the verifier's
+// configured LockTTL; LeaseExpiry = 0 remains non-expiring). It returns an
+// error when the lock is gone, held by a different holder, past its stored
+// lease, or the check itself fails.
+// There is no CAS on OCI tags and registries do not enforce leases, so a
+// caller cannot close the race between a successful VerifyLock and a
+// subsequent Put — this is a best-effort ownership check (the W1 window is
+// unchanged; clock skew between holders is unmodeled).
 func (c *Client) VerifyLock(ctx context.Context, stateID, lockID string) error {
 	ctx, cancel := c.opContext(ctx)
 	defer cancel()
@@ -662,7 +667,31 @@ func (wc *workspaceClient) verifyLock(ctx context.Context, lockID string) error 
 	if existing.ID != lockID {
 		return fmt.Errorf("lock for %q is held by %q, not %q", wc.lockTag, existing.ID, lockID)
 	}
+	// Stored-lease enforcement: the manifest's own lease_expiry decides, not
+	// the verifier's configured LockTTL (the holder and a rival may have
+	// different TTL configs; the stored value is what was agreed at
+	// acquisition). LeaseExpiry = 0 remains non-expiring. Takeover staleness
+	// (isLockStale) is a separate, config-TTL-based check on the next Lock.
+	lease, err := parseLockManifestData(&fm)
+	if err != nil {
+		return fmt.Errorf("failed to verify lock: %w", err)
+	}
+	if isStoredLeaseExpired(lease) {
+		return fmt.Errorf("lock for %q expired: stored lease_expiry is in the past (%s; checked with the local clock; clock skew between holders is unmodeled)",
+			wc.lockTag, time.Unix(0, lease.LeaseExpiry).UTC().Format(time.RFC3339Nano))
+	}
 	return nil
+}
+
+// isStoredLeaseExpired reports whether a stored positive lease_expiry is
+// already past according to the local wall clock. The verifier's configured
+// LockTTL is deliberately ignored here: the manifest's stored expiry is the
+// shared fact both sides agree on. LeaseExpiry <= 0 means non-expiring.
+func isStoredLeaseExpired(data *lockManifestData) bool {
+	if data == nil || data.LeaseExpiry <= 0 {
+		return false
+	}
+	return time.Now().UTC().UnixNano() > data.LeaseExpiry
 }
 
 // mutableTagObservationLimit bounds how often the tag is OBSERVED after a
