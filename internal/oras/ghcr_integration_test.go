@@ -18,7 +18,9 @@ const (
 	ghcrTestEnvVar  = "TF_ORAS_GHCR_TEST"
 	ghcrTokenEnvVar = "TF_ORAS_GHCR_TOKEN"
 	ghcrAddr        = "ghcr.io"
-	ghcrRepoPath    = "vmvarela/terraform-provider-oras"
+	// Keep hash-layout tests separate from artifacts left by legacy CI runs.
+	// Reusing the old repository would correctly trigger migration refusal.
+	ghcrRepoPath = "vmvarela/terraform-provider-oras/workspace-hash"
 )
 
 // requireGHCRTest skips the test unless TF_ORAS_GHCR_TEST is set and a

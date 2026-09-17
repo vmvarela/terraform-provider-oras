@@ -52,6 +52,28 @@ func freeLocalPort(t *testing.T) string {
 // startZot starts a zot registry container and registers cleanup.
 func startZot(t *testing.T, port string) (containerID string) {
 	t.Helper()
+	if binary := os.Getenv("TF_ORAS_ZOT_BINARY"); binary != "" {
+		// Optional native Zot for environments without Docker. Use a fresh
+		// storage directory and the same HTTP API/version as the CI image.
+		configFile := filepath.Join(t.TempDir(), "zot-config.json")
+		config, err := json.Marshal(map[string]any{
+			"storage": map[string]string{"rootDirectory": t.TempDir()},
+			"http":    map[string]string{"address": "127.0.0.1", "port": port},
+			"log":     map[string]string{"level": "error"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(configFile, config, 0600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(binary, "serve", configFile)
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start native Zot: %v", err)
+		}
+		t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+		return ""
+	}
 	configFile := filepath.Join(t.TempDir(), "zot-config.json")
 	if err := os.WriteFile(configFile, []byte(zotMinimalConfig), 0644); err != nil {
 		t.Fatalf("write zot config: %v", err)
@@ -344,9 +366,9 @@ func TestZotIntegration_Retention(t *testing.T) {
 	c.WaitForRetention()
 
 	// Count version tags; must not exceed maxVersions.
-	prefix := stateVersionTagPrefix + "default" + stateVersionTagSeparator
+	prefix := stateVersionTagPrefix + workspaceTagFor("default") + stateVersionTagSeparator
 	versionTags := countZotVersionTags(t, addr, "provider-test/retention", prefix)
-	if versionTags > maxVersions {
+	if versionTags == 0 || versionTags > maxVersions {
 		t.Errorf("expected ≤%d version tags, found %d", maxVersions, versionTags)
 	}
 }

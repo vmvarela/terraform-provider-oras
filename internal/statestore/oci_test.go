@@ -458,6 +458,13 @@ func (f *fakeOCIRegistry) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	rest := strings.TrimPrefix(r.URL.Path, "/v2/")
 	switch {
+	case strings.HasSuffix(rest, "/tags/list"):
+		tags := make([]string, 0, len(f.tagOf))
+		for tag := range f.tagOf {
+			tags = append(tags, tag)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"name": strings.TrimSuffix(rest, "/tags/list"), "tags": tags})
 	case strings.Contains(rest, "/manifests/"):
 		f.serveManifest(w, r, rest)
 	case strings.Contains(rest, "/blobs/uploads"):
@@ -630,6 +637,7 @@ func rivalLockManifest(t *testing.T, holderID string) []byte {
 	body, err := json.Marshal(map[string]any{
 		"artifactType": "application/vnd.terraform.lock.v1",
 		"annotations": map[string]string{
+			"org.terraform.workspace":       "default",
 			"org.terraform.lock.id":         holderID,
 			"org.terraform.lock.info":       string(info),
 			"org.terraform.lock.generation": `{"generation":42,"holder_id":"` + holderID + `"}`,
@@ -644,7 +652,10 @@ func rivalLockManifest(t *testing.T, holderID string) []byte {
 // ─── Lock / Unlock / Write lifecycle ──────────────────────────────────────────
 
 // testLockTag is lockTagPrefix + workspaceTagFor("default") from internal/oras.
-const testLockTag = "locked-default"
+const testWorkspaceTag = "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f"
+const testLockTag = "locked-" + testWorkspaceTag
+const testStateTag = "state-" + testWorkspaceTag
+const testVersionTagPrefix = "stver-" + testWorkspaceTag + "-v"
 
 // testNewInstance configures an additional per-RPC instance on the same
 // shared state, as Terraform does for every RPC.
@@ -741,7 +752,7 @@ func TestStateStoreWriteRefusedWhenLockLost(t *testing.T) {
 	}
 
 	// Nothing may have been written: the state tag must not exist.
-	if reg.HasTag("state-default") {
+	if reg.HasTag(testStateTag) {
 		t.Error("state was written despite lost lock")
 	}
 }

@@ -30,7 +30,6 @@ import (
 	"golang.org/x/sync/errgroup"
 	oras "oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/errdef"
-	orasRegistry "oras.land/oras-go/v2/registry"
 	orasErrcode "oras.land/oras-go/v2/registry/remote/errcode"
 )
 
@@ -225,6 +224,9 @@ func (c *Client) Get(ctx context.Context, stateID string) ([]byte, error) {
 	ctx, cancel := c.opContext(ctx)
 	defer cancel()
 	wc := newWorkspaceClient(c, stateID)
+	if err := wc.checkWorkspace(ctx); err != nil {
+		return nil, err
+	}
 	return retryWithResult(ctx, func(ctx context.Context) ([]byte, error) {
 		return wc.get(ctx)
 	})
@@ -305,6 +307,9 @@ func (c *Client) Put(ctx context.Context, stateID string, data []byte) error {
 	ctx, cancel := c.opContext(ctx)
 	defer cancel()
 	wc := newWorkspaceClient(c, stateID)
+	if err := wc.checkWorkspace(ctx); err != nil {
+		return err
+	}
 	return wc.put(ctx, data)
 }
 
@@ -438,6 +443,9 @@ func (c *Client) Delete(ctx context.Context, stateID string) error {
 	ctx, cancel := c.opContext(ctx)
 	defer cancel()
 	wc := newWorkspaceClient(c, stateID)
+	if err := wc.checkWorkspace(ctx); err != nil {
+		return err
+	}
 	return retry(ctx, func(ctx context.Context) error {
 		return wc.delete(ctx)
 	})
@@ -462,6 +470,9 @@ func (c *Client) Lock(ctx context.Context, stateID string, info LockInfo) (strin
 	ctx, cancel := c.opContext(ctx)
 	defer cancel()
 	wc := newWorkspaceClient(c, stateID)
+	if err := wc.checkWorkspace(ctx); err != nil {
+		return "", err
+	}
 	return wc.lock(ctx, &info)
 }
 
@@ -626,6 +637,9 @@ func (c *Client) Unlock(ctx context.Context, stateID, lockID string) error {
 	ctx, cancel := c.opContext(ctx)
 	defer cancel()
 	wc := newWorkspaceClient(c, stateID)
+	if err := wc.checkWorkspace(ctx); err != nil {
+		return err
+	}
 	return wc.unlock(ctx, lockID)
 }
 
@@ -644,6 +658,9 @@ func (c *Client) VerifyLock(ctx context.Context, stateID, lockID string) error {
 	ctx, cancel := c.opContext(ctx)
 	defer cancel()
 	wc := newWorkspaceClient(c, stateID)
+	if err := wc.checkWorkspace(ctx); err != nil {
+		return err
+	}
 	return wc.verifyLock(ctx, lockID)
 }
 
@@ -1240,6 +1257,9 @@ func (wc *workspaceClient) fetchManifestInternal(ctx context.Context, reference 
 	if m.Annotations == nil {
 		m.Annotations = map[string]string{}
 	}
+	if err := validateWorkspaceManifest(m, reference, wc.stateID); err != nil {
+		return ocispec.Manifest{}, ocispec.Descriptor{}, err
+	}
 	return m, desc, nil
 }
 
@@ -1286,51 +1306,30 @@ func parseLockManifestData(m *ocispec.Manifest) (*lockManifestData, error) {
 	return &lockManifestData{Generation: 0}, nil
 }
 
-// workspaceTagFor converts a workspace name to a valid OCI tag, hashing if necessary.
+// workspaceTagFor hashes exact workspace bytes; literals never bypass encoding.
 func workspaceTagFor(workspace string) string {
-	ref := orasRegistry.Reference{Reference: workspace}
-	if err := ref.ValidateReferenceAsTag(); err == nil {
-		return workspace
-	}
 	h := sha256.Sum256([]byte(workspace))
-	return "ws-" + hex.EncodeToString(h[:8])
+	return hex.EncodeToString(h[:])
 }
 
 // listWorkspacesFromTags discovers workspace names by scanning the repository's
 // OCI tags.
 //
 // Pre:  ctx is non-nil; repo is non-nil with a valid inner repository.
-// Post: returns a sorted, deduplicated list of workspace names. Names that were
-//
-//	originally hashed (ws-* tags) are resolved from their manifest
-//	annotation. Returns nil slice (not error) if no workspaces exist.
+// Post: returns sorted, deduplicated original names from verified manifest
+// annotations. Returns nil (not an error) if no workspaces exist. Legacy or
+// ambiguous identities fail closed.
 func listWorkspacesFromTags(ctx context.Context, repo *orasRepositoryClient) ([]string, error) {
-	var tags []string
-	if err := repo.inner.Tags(ctx, "", func(page []string) error {
-		tags = append(tags, page...)
-		return nil
-	}); err != nil {
-		if isNotFound(err) {
-			return nil, nil
-		}
+	identities, err := repositoryWorkspaceIdentities(ctx, repo)
+	if err != nil {
 		return nil, err
 	}
-
 	var out []string
-	for _, tag := range tags {
-		if !strings.HasPrefix(tag, stateTagPrefix) {
-			continue
-		}
-		name, err := workspaceNameFromTag(ctx, repo, tag)
-		if err != nil {
-			slog.Debug("failed to resolve workspace name", "tag", tag, "error", err)
-			continue
-		}
-		if name != "" {
+	for tag, name := range identities {
+		if strings.HasPrefix(tag, stateTagPrefix) {
 			out = append(out, name)
 		}
 	}
-
 	slices.Sort(out)
 	return slices.Compact(out), nil
 }
@@ -1357,11 +1356,6 @@ func splitStateVersionTag(tag string) (base string, version int, ok bool) {
 }
 
 func workspaceNameFromTag(ctx context.Context, repo *orasRepositoryClient, stateTag string) (string, error) {
-	wsTag := strings.TrimPrefix(stateTag, stateTagPrefix)
-	if !strings.HasPrefix(wsTag, "ws-") {
-		return wsTag, nil
-	}
-
 	// Use retry for transient errors
 	return retryWithResult(ctx, func(ctx context.Context) (string, error) {
 		desc, err := repo.inner.Resolve(ctx, stateTag)
@@ -1383,10 +1377,12 @@ func workspaceNameFromTag(ctx context.Context, repo *orasRepositoryClient, state
 		if err := json.Unmarshal(data, &m); err != nil {
 			return "", fmt.Errorf("decoding manifest for workspace tag %q: %w", stateTag, err)
 		}
-		if name := m.Annotations[annotationWorkspace]; name != "" {
-			return name, nil
+		name, ok := m.Annotations[annotationWorkspace]
+		id, reserved := workspaceIDFromTag(stateTag)
+		if !ok || !reserved || id != workspaceTagFor(name) {
+			return "", fmt.Errorf("workspace identity mismatch at tag %q; stop writers and restore verified metadata (see docs/guides/workspace-migration.md)", stateTag)
 		}
-		return wsTag, nil
+		return name, nil
 	})
 }
 

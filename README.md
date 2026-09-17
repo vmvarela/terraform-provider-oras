@@ -44,11 +44,20 @@ Full configuration reference, storage layout, and locking semantics: [`docs/inde
 Architecture, consistency guarantees, and failure behavior: [`docs/architecture.md`](docs/architecture.md).
 Credential resolution: [`docs/guides/authentication.md`](docs/guides/authentication.md).
 
+## Workspace layout upgrade
+
+This branch changes **all workspace identifiers**, including `default`, to
+full SHA-256. Existing repositories are rejected until explicitly migrated to
+a separate empty repository. Stop all writers and follow the
+[workspace migration guide](docs/guides/workspace-migration.md) before upgrading.
+Do not mix old and new provider versions against the same repository.
+
 ## Development
 
 ```bash
 make test                           # unit tests, no external deps
 TF_ORAS_ZOT_TEST=1 make test-zot    # integration: spins Zot via Docker
+# Without Docker: also set TF_ORAS_ZOT_BINARY=/absolute/path/to/zot (v2.1.0)
 make coverage                       # tests + coverage gate (default 80%, COVERAGE_THRESHOLD=N to change)
 make lint
 make install                        # build + install to ~/.terraform.d/... (VERSION= overrides the mirror dir)

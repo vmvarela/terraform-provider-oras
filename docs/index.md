@@ -99,11 +99,11 @@ Each workspace maps to its own tags:
 
 | Tag | Purpose |
 |-----|---------|
-| `state-<workspace>` | Current state |
-| `stver-<workspace>-v<N>` | Versioned snapshots (when `max_versions > 0`) |
-| `locked-<workspace>` / `unlocked-<workspace>` | Lock state (`unlocked-` is the GHCR fallback) |
+| `state-<sha256>` | Current state |
+| `stver-<sha256>-v<N>` | Versioned snapshots (when `max_versions > 0`) |
+| `locked-<sha256>` / `unlocked-<sha256>` | Lock state (`unlocked-` is the GHCR fallback) |
 
-Workspace names that aren't valid OCI tags are hashed to `ws-<hash>`. The original workspace name is recorded in the `org.terraform.workspace` annotation on every state and lock manifest (not only hashed names).
+Every workspace name is encoded as its full lowercase SHA-256 digest. The original name is required in the `org.terraform.workspace` annotation on every state and lock manifest. Tags and annotations are verified together. **Existing repositories require explicit migration**; see [workspace mapping and migration](guides/workspace-migration.md).
 
 | Content | Media type |
 |---------|------------|
