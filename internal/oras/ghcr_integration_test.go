@@ -71,6 +71,14 @@ func TestGHCRIntegration_StateRoundTrip(t *testing.T) {
 		t.Fatal("expected nil on empty workspace")
 	}
 
+	// Keep another tagged version in this newly isolated test package. GHCR
+	// can reject deleting its last tagged version with HTTP 400. This fixture
+	// must exercise state deletion without attempting to remove the package's
+	// final tagged version; do not weaken the Delete assertion below.
+	if err := c.Put(ctx, "ci-package-anchor", []byte(`{"version":4,"serial":0,"fixture":"retained"}`)); err != nil {
+		t.Fatalf("create retained package fixture: %v", err)
+	}
+
 	stateData := []byte(`{"version":4,"serial":1,"ghcr-integration":true}`)
 	if err := c.Put(ctx, ws, stateData); err != nil {
 		t.Fatalf("Put: %v", err)
