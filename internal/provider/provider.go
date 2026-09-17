@@ -1,7 +1,7 @@
 // Package provider implements the OCI state store provider for Terraform.
 // It satisfies both provider.Provider and provider.ProviderWithStateStores from
-// the Terraform Plugin Framework, exposing provider-level TLS configuration
-// (insecure, ca_file) consumed by the state stores added in later phases.
+// the Terraform Plugin Framework, exposing provider-level transport and TLS
+// configuration consumed by the state stores.
 package provider
 
 import (
@@ -10,6 +10,7 @@ import (
 	"os"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
@@ -40,8 +41,10 @@ func New() func() provider.Provider {
 
 // providerModel mirrors the HCL provider block attributes.
 type providerModel struct {
-	Insecure types.Bool   `tfsdk:"insecure"`
-	CAFile   types.String `tfsdk:"ca_file"`
+	PlainHTTP     types.Bool   `tfsdk:"plain_http"`
+	TLSSkipVerify types.Bool   `tfsdk:"tls_skip_verify"`
+	Insecure      types.Bool   `tfsdk:"insecure"`
+	CAFile        types.String `tfsdk:"ca_file"`
 }
 
 // Metadata sets the provider type name used to prefix resource/state-store names.
@@ -55,9 +58,18 @@ func (p *OrasProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp 
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Provider for storing Terraform state in OCI registries via the ORAS protocol.",
 		Attributes: map[string]schema.Attribute{
+			"plain_http": schema.BoolAttribute{
+				Optional:            true,
+				MarkdownDescription: "Use unencrypted HTTP instead of HTTPS. Defaults to `false`. Cannot be combined with `insecure`. When true, conflicts with a non-empty `ca_file` or `tls_skip_verify = true`.",
+			},
+			"tls_skip_verify": schema.BoolAttribute{
+				Optional:            true,
+				MarkdownDescription: "Disable HTTPS certificate verification while retaining TLS. Defaults to `false`. Prefer `ca_file` for private CAs. Cannot be combined with `insecure`. When true, conflicts with a non-empty `ca_file`.",
+			},
 			"insecure": schema.BoolAttribute{
 				Optional:            true,
-				MarkdownDescription: "Skip TLS certificate verification when communicating with the OCI registry. Defaults to `false`.",
+				MarkdownDescription: "Deprecated: retains legacy behavior, enabling plain HTTP and disabling TLS certificate verification when true. Defaults to `false`. Cannot be combined with `plain_http` or `tls_skip_verify`, even when false.",
+				DeprecationMessage:  "Use plain_http for HTTP or tls_skip_verify for HTTPS without certificate verification. Remove insecure before setting either option.",
 			},
 			"ca_file": schema.StringAttribute{
 				Optional:            true,
@@ -71,6 +83,11 @@ func (p *OrasProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp 
 func (p *OrasProvider) ValidateConfig(ctx context.Context, req provider.ValidateConfigRequest, resp *provider.ValidateConfigResponse) {
 	var cfg providerModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &cfg)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	validateTransportConfig(cfg, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -103,13 +120,29 @@ func (p *OrasProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 		return
 	}
 
-	insecure := !cfg.Insecure.IsNull() && !cfg.Insecure.IsUnknown() && cfg.Insecure.ValueBool()
+	validateTransportConfig(cfg, &resp.Diagnostics)
+	for name, unknown := range map[string]bool{
+		"insecure": cfg.Insecure.IsUnknown(), "plain_http": cfg.PlainHTTP.IsUnknown(),
+		"tls_skip_verify": cfg.TLSSkipVerify.IsUnknown(), "ca_file": cfg.CAFile.IsUnknown(),
+	} {
+		if unknown {
+			resp.Diagnostics.AddAttributeError(path.Root(name), "Unknown transport setting", "Transport settings must be known before configuring the state store.")
+		}
+	}
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	plainHTTP, skipVerify := cfg.PlainHTTP.ValueBool(), cfg.TLSSkipVerify.ValueBool()
+	if cfg.Insecure.ValueBool() {
+		// Preserve the old transport and trust behavior only for the legacy option.
+		plainHTTP, skipVerify = true, true
+	}
 	caFile := ""
 	if !cfg.CAFile.IsNull() && !cfg.CAFile.IsUnknown() {
 		caFile = cfg.CAFile.ValueString()
 	}
 
-	httpClient, err := oras.BuildHTTPClient(insecure, caFile)
+	httpClient, err := oras.BuildHTTPClient(skipVerify, caFile)
 	if err != nil {
 		resp.Diagnostics.AddError("Failed to create HTTP client", err.Error())
 		return
@@ -118,7 +151,7 @@ func (p *OrasProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 	// Share the same ProviderData with state stores. The provider has zero
 	// resources and data sources, so ResourceData/DataSourceData are not set.
 	resp.StateStoreData = &ocistatestore.ProviderData{
-		Insecure:   insecure,
+		PlainHTTP:  plainHTTP,
 		HTTPClient: httpClient,
 	}
 }
@@ -133,5 +166,21 @@ func (p *OrasProvider) Resources(_ context.Context) []func() resource.Resource {
 func (p *OrasProvider) StateStores(_ context.Context) []func() statestore.StateStore {
 	return []func() statestore.StateStore{
 		ocistatestore.New(),
+	}
+}
+
+// validateTransportConfig rejects ambiguity instead of assigning precedence.
+// Unknown values are deferred during validation and rejected by Configure.
+func validateTransportConfig(cfg providerModel, diags *diag.Diagnostics) {
+	legacy := !cfg.Insecure.IsNull()
+	if legacy && (!cfg.PlainHTTP.IsNull() || !cfg.TLSSkipVerify.IsNull()) {
+		diags.AddAttributeError(path.Root("insecure"), "Conflicting transport settings", "Remove insecure before setting plain_http or tls_skip_verify, even when their values are false. Legacy insecure behavior is preserved only when the new options are absent.")
+	}
+	hasCA := !cfg.CAFile.IsUnknown() && cfg.CAFile.ValueString() != ""
+	if cfg.PlainHTTP.ValueBool() && (cfg.TLSSkipVerify.ValueBool() || hasCA) {
+		diags.AddAttributeError(path.Root("plain_http"), "Conflicting transport settings", "plain_http = true cannot be combined with tls_skip_verify = true or a non-empty ca_file; TLS settings do not apply to HTTP.")
+	}
+	if cfg.TLSSkipVerify.ValueBool() && hasCA {
+		diags.AddAttributeError(path.Root("tls_skip_verify"), "Conflicting TLS settings", "tls_skip_verify = true cannot be combined with a non-empty ca_file; use ca_file with certificate verification enabled.")
 	}
 }

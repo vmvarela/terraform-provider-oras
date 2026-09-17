@@ -52,6 +52,14 @@ a separate empty repository. Stop all writers and follow the
 [workspace migration guide](docs/guides/workspace-migration.md) before upgrading.
 Do not mix old and new provider versions against the same repository.
 
+## HTTP and TLS configuration
+
+HTTPS with certificate verification remains the default. Use `plain_http = true`
+for local HTTP registries, `ca_file` for private CAs, or `tls_skip_verify = true`
+to explicitly disable verification while retaining HTTPS. Legacy `insecure`
+is deprecated and preserves its existing behavior; remove it before using
+either new option. See [transport upgrade instructions](docs/guides/authentication.md#upgrade-from-insecure).
+
 ## Development
 
 ```bash

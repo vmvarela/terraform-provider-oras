@@ -53,7 +53,7 @@ terraform init
 terraform apply
 ```
 
-For a local registry over plain HTTP (e.g. Zot), set `insecure`:
+For a local registry over plain HTTP (e.g. Zot), set `plain_http`:
 
 ```hcl
 terraform {
@@ -64,7 +64,7 @@ terraform {
 }
 
 provider "oras" {
-  insecure = true
+  plain_http = true
 }
 ```
 
@@ -84,8 +84,12 @@ A runnable version lives in [`examples/main.tf`](../examples/main.tf).
 
 | Argument   | Required | Default | Description |
 |------------|:--------:|---------|-------------|
-| `insecure` |          | `false` | Skip TLS verification and use plain HTTP (local registries) |
+| `plain_http` |          | `false` | Explicitly use unencrypted HTTP instead of HTTPS |
+| `tls_skip_verify` |          | `false` | Disable certificate verification while retaining HTTPS |
+| `insecure` |          | `false` | Deprecated: preserve legacy HTTP and disabled TLS verification; do not combine with either new option |
 | `ca_file`  |          | —       | PEM-encoded CA bundle for self-signed registries |
+
+See [transport configuration and upgrade instructions](guides/authentication.md#transport-and-tls) for conflicts and migration from `insecure`. HTTPS with certificate verification remains the default.
 
 ## Authentication
 

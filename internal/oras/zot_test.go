@@ -169,7 +169,7 @@ func countZotVersionTags(t *testing.T, addr, repoPath, prefix string) int {
 func newZotClient(t *testing.T, addr, repoPath string, cfg Config) *Client {
 	t.Helper()
 	base := Config{
-		Insecure: true,
+		PlainHTTP: true,
 	}
 	// Merge provided config over base
 	if cfg.HTTPClient != nil {

@@ -10,7 +10,7 @@ terraform {
   # on `terraform init`.
   state_store "oras_oci" {
     provider "oras" {
-      insecure = true
+      plain_http = true
     }
 
     url = "oci://localhost:5001/estado"

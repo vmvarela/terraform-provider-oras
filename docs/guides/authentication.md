@@ -84,16 +84,73 @@ Invoked as `docker-credential-<name> get` with a 30s timeout. A helper reporting
 skipped and resolution falls through. Malformed config files are logged and skipped — resolution
 never fails, it degrades to anonymous.
 
-## TLS
+## Transport and TLS
 
-Credentials come from the sources above; TLS lives in the provider block:
+HTTPS with certificate verification is the default. Credentials still come from
+the sources above; transport settings live in the provider configuration.
+The `oci://` state-store URL identifies the repository and does not select HTTP.
+
+| Configuration | Registry transport | Certificate verification |
+|---|---|---|
+| No options (or both new options false) | HTTPS | Enabled, system trust |
+| `ca_file = "/path/to/ca.pem"` | HTTPS | Enabled, supplied CA bundle |
+| `tls_skip_verify = true` | HTTPS | Disabled |
+| `plain_http = true` | HTTP | No TLS |
+
+For a private CA, keep verification enabled:
 
 ```hcl
 provider "oras" {
-  insecure = true                            # plain HTTP / skip verification (local dev)
-  ca_file  = "/path/to/ca-bundle.pem"        # self-signed registries
+  ca_file = "/path/to/ca-bundle.pem"
 }
 ```
+
+For a local HTTP registry such as the Zot development example:
+
+```hcl
+provider "oras" {
+  plain_http = true
+}
+```
+
+For an explicit HTTPS connection without certificate verification:
+
+```hcl
+provider "oras" {
+  tls_skip_verify = true
+}
+```
+
+Prefer a trusted CA over disabling verification. Plain HTTP does not encrypt
+state or credentials. Neither a certificate error nor `tls_skip_verify` causes
+an automatic fallback to HTTP. A custom CA bundle replaces the system trust
+pool, preserving the existing `ca_file` behavior.
+
+### Upgrade from `insecure`
+
+`insecure` is deprecated but retains its previous behavior: `true` selects HTTP
+and disables TLS certificate verification in the HTTP client; `false` retains
+verified HTTPS. It is not reinterpreted as an HTTPS-only verification option.
+There is no removal in this change.
+
+- For existing HTTP configurations, replace `insecure = true` with
+  `plain_http = true`.
+- To intentionally change from HTTP to HTTPS without verification, remove
+  `insecure` and set `tls_skip_verify = true`. Confirm the registry serves HTTPS.
+- For verified HTTPS, remove `insecure = false`; retain `ca_file` if needed.
+- Remove `insecure` before specifying either new option. Any non-null legacy
+  and new option combination is an error, even when explicitly set to false.
+  No option silently takes precedence.
+- `plain_http = true` conflicts with `tls_skip_verify = true` or a non-empty
+  `ca_file`. `tls_skip_verify = true` also conflicts with a non-empty `ca_file`:
+  supplying trust anchors while disabling verification is rejected.
+- Legacy `insecure` plus `ca_file` remains accepted for compatibility. With
+  `insecure = true`, the file is still loaded but does not verify HTTP traffic.
+  Remove it when migrating to `plain_http`, or switch to verified HTTPS.
+
+Unknown settings are deferred during validation, but must be resolved before
+provider configuration. This change does not alter state storage or credential
+precedence and requires no state migration.
 
 ## CI Example
 
@@ -115,5 +172,6 @@ ghcr.io, confirm the token can see the package.
 with a simulated 405 registry; live GHCR integration is env-gated and does not necessarily prove
 the 405 branch). The Packages API fallback needs `delete:packages`.
 
-**`x509: certificate signed by unknown authority`** — set `ca_file`, or `insecure = true` for local
-plain-HTTP registries.
+**`x509: certificate signed by unknown authority`** — configure the correct `ca_file`.
+For an explicit local HTTPS bypass, use `tls_skip_verify = true`; it retains HTTPS.
+Use `plain_http = true` only for a registry that actually serves HTTP.

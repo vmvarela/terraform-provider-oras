@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/provider"
+	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
 	fwss "github.com/hashicorp/terraform-plugin-framework/statestore"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
@@ -69,7 +70,10 @@ func TestProviderMetadata(t *testing.T) {
 func TestProviderSchema(t *testing.T) {
 	resp := &provider.SchemaResponse{}
 	(&OrasProvider{}).Schema(context.Background(), provider.SchemaRequest{}, resp)
-	for _, attr := range []string{"insecure", "ca_file"} {
+	if resp.Schema.Attributes["insecure"].(schema.BoolAttribute).DeprecationMessage == "" {
+		t.Error("legacy insecure must emit a schema deprecation warning")
+	}
+	for _, attr := range []string{"insecure", "plain_http", "tls_skip_verify", "ca_file"} {
 		if _, ok := resp.Schema.Attributes[attr]; !ok {
 			t.Errorf("schema missing attribute %q", attr)
 		}
@@ -118,8 +122,8 @@ func TestProviderConfigure(t *testing.T) {
 	if !ok {
 		t.Fatalf("StateStoreData is %T, want *ocistatestore.ProviderData", resp.StateStoreData)
 	}
-	if !pd.Insecure {
-		t.Error("ProviderData.Insecure = false, want true")
+	if !pd.PlainHTTP {
+		t.Error("ProviderData.PlainHTTP = false, want true")
 	}
 	if pd.HTTPClient == nil {
 		t.Error("ProviderData.HTTPClient is nil")

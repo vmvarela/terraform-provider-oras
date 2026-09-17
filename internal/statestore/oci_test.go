@@ -318,7 +318,7 @@ func TestStateStoreInitialize(t *testing.T) {
 				"lock_ttl":     strVal("15m"),
 				"max_versions": int64Val(3),
 			}),
-			ProviderData: &ProviderData{Insecure: false},
+			ProviderData: &ProviderData{PlainHTTP: false},
 		}, resp)
 		if resp.Diagnostics.HasError() {
 			t.Fatalf("unexpected diagnostics: %v", resp.Diagnostics)
@@ -604,7 +604,7 @@ func newTestStore(t *testing.T) (*OCIStateStore, *fakeOCIRegistry, *stateStoreDa
 		Config: storeConfig(map[string]tftypes.Value{
 			"url": strVal("oci://" + srv.Listener.Addr().String() + "/test/repo"),
 		}),
-		ProviderData: &ProviderData{Insecure: true},
+		ProviderData: &ProviderData{PlainHTTP: true},
 	}, initResp)
 	if initResp.Diagnostics.HasError() {
 		t.Fatalf("initialize: %v", initResp.Diagnostics)
