@@ -69,26 +69,28 @@ zero. Provider-level `insecure`/`ca_file` flow through `ProviderData`
 
 ## 4. Workspace → OCI mapping
 
-```
-workspace name ── valid OCI tag? ── yes → verbatim  ("default")
-        │ no
-        └→ sha256[0:8] hex → "ws-<16hex>"      (client.go:1069-1077)
-```
-
-Tag builders (`newWorkspaceClient`, `client.go:160-170`):
+Every workspace name maps to the full lowercase SHA-256 digest of its exact
+UTF-8 bytes (no normalization). All generated tags are bounded independently
+of the name length:
 
 | Tag | Pattern |
 |---|---|
-| Current state | `state-<ws>` |
-| Version snapshot | `stver-<ws>-v<N>` (`client.go:675-677`) |
-| Lock | `locked-<ws>` |
-| Unlocked marker (GHCR fallback) | `unlocked-<ws>` |
+| Current state | `state-<sha256>` |
+| Version snapshot | `stver-<sha256>-v<N>` |
+| Lock | `locked-<sha256>` |
+| Unlocked marker | `unlocked-<sha256>` |
 
-The `org.terraform.workspace` annotation carries the **original** workspace
-name and is written **unconditionally on every state and lock manifest**
-(`client.go:640,667`) — not only for hashed names. `List` reconstructs
-workspace names from state tags, resolving `ws-*` via that annotation
-(`client.go:1087-1171`).
+The exact original name is required in `org.terraform.workspace` on every
+state and lock manifest. Before every public operation, reserved tags and
+annotations are checked together across the repository. Legacy, mixed or
+ambiguous layouts are rejected. Listing never guesses a missing name.
+Migration requires stopped writers and a separate empty repository; see
+[workspace migration](guides/workspace-migration.md) and
+[ADR-0002](../.agents/decisions/0002-workspace-identifiers.md).
+
+These preflights add tag enumeration and metadata reads proportional to
+retained history. They do not make subsequent writes atomic or fence old
+binaries racing after validation. The limitations below still apply.
 
 ## 5. Storage: current & historical
 

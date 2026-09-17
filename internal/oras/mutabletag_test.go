@@ -157,7 +157,7 @@ func TestPublishMutableTagResponseLostOwnDigest(t *testing.T) {
 	ctx := context.Background()
 	desc := testDesc("attempt-manifest")
 	hook := &hookingRepo{
-		inner: newFakeORASRepo(), watch: "state-default",
+		inner: newFakeORASRepo(), watch: stateTagPrefix + workspaceTagFor("default"),
 		failTagCount: 1, landOnFailure: true, firstResolve: make(chan struct{}),
 	}
 	wc := newHookedWorkspace(t, hook)
@@ -182,9 +182,9 @@ func TestPublishMutableTagForeignDigestFailClosed(t *testing.T) {
 	ctx := context.Background()
 	desc := testDesc("attempt-manifest")
 	foreign := testDesc("foreign-holder-manifest")
-	hook := &hookingRepo{inner: newFakeORASRepo(), watch: "state-default", failTagCount: 1, firstResolve: make(chan struct{})}
+	hook := &hookingRepo{inner: newFakeORASRepo(), watch: stateTagPrefix + workspaceTagFor("default"), failTagCount: 1, firstResolve: make(chan struct{})}
 	// A rival published between our pack and our (failed) tag response.
-	if err := hook.inner.Tag(ctx, foreign, "state-default"); err != nil {
+	if err := hook.inner.Tag(ctx, foreign, stateTagPrefix+workspaceTagFor("default")); err != nil {
 		t.Fatalf("seed foreign tag: %v", err)
 	}
 	wc := newHookedWorkspace(t, hook)
@@ -196,7 +196,7 @@ func TestPublishMutableTagForeignDigestFailClosed(t *testing.T) {
 	if calls := hook.tagCallCount(); calls != 1 {
 		t.Errorf("Tag calls = %d, want exactly 1 (foreign tag must not be re-tagged)", calls)
 	}
-	got, resolveErr := hook.inner.Resolve(ctx, "state-default")
+	got, resolveErr := hook.inner.Resolve(ctx, stateTagPrefix+workspaceTagFor("default"))
 	if resolveErr != nil || got.Digest != foreign.Digest {
 		t.Errorf("tag digest = %v (%v), want foreign %s preserved", got.Digest, resolveErr, foreign.Digest)
 	}
@@ -211,7 +211,7 @@ func TestPublishMutableTagAmbiguousResolveFailClosed(t *testing.T) {
 	desc := testDesc("attempt-manifest")
 	// failResolveCount large: every observation fails transiently.
 	hook := &hookingRepo{
-		inner: newFakeORASRepo(), watch: "state-default",
+		inner: newFakeORASRepo(), watch: stateTagPrefix + workspaceTagFor("default"),
 		failTagCount: 1, failResolveCount: 99, firstResolve: make(chan struct{}),
 	}
 	wc := newHookedWorkspace(t, hook)
@@ -236,7 +236,7 @@ func TestPublishMutableTagContextCancelledFailClosed(t *testing.T) {
 	defer cancel()
 	desc := testDesc("attempt-manifest")
 	hook := &hookingRepo{
-		inner: newFakeORASRepo(), watch: "state-default",
+		inner: newFakeORASRepo(), watch: stateTagPrefix + workspaceTagFor("default"),
 		failTagCount: 1, failResolveCount: 99, firstResolve: make(chan struct{}),
 	}
 	wc := newHookedWorkspace(t, hook)
@@ -271,7 +271,7 @@ func TestPublishMutableTagDeadlineExceededFailClosed(t *testing.T) {
 	// Ambiguous: every observation fails transiently, so the helper enters
 	// its bounded backoff, where the 100ms deadline fires.
 	hook := &hookingRepo{
-		inner: newFakeORASRepo(), watch: "state-default",
+		inner: newFakeORASRepo(), watch: stateTagPrefix + workspaceTagFor("default"),
 		failTagCount: 1, failResolveCount: 99, firstResolve: make(chan struct{}),
 	}
 	wc := newHookedWorkspace(t, hook)
@@ -297,7 +297,7 @@ func TestPublishMutableTagAbsentTagFailClosedNoReapply(t *testing.T) {
 	ctx := context.Background()
 	desc := testDesc("attempt-manifest")
 	// failTagCount=1 without landing: the Tag failed and nothing was published.
-	hook := &hookingRepo{inner: newFakeORASRepo(), watch: "state-default", failTagCount: 1, firstResolve: make(chan struct{})}
+	hook := &hookingRepo{inner: newFakeORASRepo(), watch: stateTagPrefix + workspaceTagFor("default"), failTagCount: 1, firstResolve: make(chan struct{})}
 	wc := newHookedWorkspace(t, hook)
 
 	err := wc.publishMutableTag(ctx, desc, wc.stateTag)
@@ -327,11 +327,11 @@ func TestPublishMutableTagRivalDuringObservationNoReapply(t *testing.T) {
 	fake := newFakeORASRepo()
 	blocked := &gateResolveRepo{
 		inner:         fake,
-		watch:         "state-default",
+		watch:         stateTagPrefix + workspaceTagFor("default"),
 		release:       make(chan struct{}),
 		firstObserved: make(chan struct{}),
 	}
-	hook := &hookingRepo{inner: blocked, watch: "state-default", failTagCount: 1, firstResolve: make(chan struct{})}
+	hook := &hookingRepo{inner: blocked, watch: stateTagPrefix + workspaceTagFor("default"), failTagCount: 1, firstResolve: make(chan struct{})}
 	wc := newHookedWorkspace(t, hook)
 
 	errCh := make(chan error, 1)
@@ -343,7 +343,7 @@ func TestPublishMutableTagRivalDuringObservationNoReapply(t *testing.T) {
 		t.Fatal("timed out waiting for the parked observation")
 	}
 	// A rival publishes while the helper is parked mid-observation.
-	if err := blocked.inner.Tag(ctx, foreign, "state-default"); err != nil {
+	if err := blocked.inner.Tag(ctx, foreign, stateTagPrefix+workspaceTagFor("default")); err != nil {
 		t.Fatalf("rival install: %v", err)
 	}
 	close(blocked.release)
@@ -355,7 +355,7 @@ func TestPublishMutableTagRivalDuringObservationNoReapply(t *testing.T) {
 	if calls := hook.tagCallCount(); calls != 1 {
 		t.Errorf("Tag calls = %d, want exactly 1 (no re-apply over the rival)", calls)
 	}
-	got, resolveErr := hook.inner.Resolve(ctx, "state-default")
+	got, resolveErr := hook.inner.Resolve(ctx, stateTagPrefix+workspaceTagFor("default"))
 	if resolveErr != nil || got.Digest != foreign.Digest {
 		t.Errorf("tag digest = %v (%v), want rival %s preserved", got.Digest, resolveErr, foreign.Digest)
 	}
@@ -427,12 +427,12 @@ func TestLockTagMovedMapsToContentionBothSentinels(t *testing.T) {
 	// the first one is A's pre-tag fetch and must see an empty tag.
 	blocked := &gateResolveRepo{
 		inner:         fake,
-		watch:         "locked-default",
+		watch:         lockTagPrefix + workspaceTagFor("default"),
 		blockFrom:     2,
 		release:       make(chan struct{}),
 		firstObserved: make(chan struct{}),
 	}
-	hook := &hookingRepo{inner: blocked, watch: "locked-default", failTagCount: 1, firstResolve: make(chan struct{})}
+	hook := &hookingRepo{inner: blocked, watch: lockTagPrefix + workspaceTagFor("default"), failTagCount: 1, firstResolve: make(chan struct{})}
 	repo := &orasRepositoryClient{inner: hook, repository: "example.com/test/repo"}
 	wc := newRemoteClient(repo, "default")
 
@@ -456,7 +456,7 @@ func TestLockTagMovedMapsToContentionBothSentinels(t *testing.T) {
 	case <-time.After(testObservationTimeout):
 		t.Fatal("timed out waiting for the parked observation")
 	}
-	if err := fake.Tag(ctx, rivalDesc, "locked-default"); err != nil {
+	if err := fake.Tag(ctx, rivalDesc, lockTagPrefix+workspaceTagFor("default")); err != nil {
 		t.Fatalf("rival install: %v", err)
 	}
 	close(blocked.release)
@@ -490,20 +490,20 @@ func TestPublishMutableTagForeignVersionTag(t *testing.T) {
 	ctx := context.Background()
 	desc := testDesc("attempt-manifest")
 	foreign := testDesc("foreign-version-manifest")
-	hook := &hookingRepo{inner: newFakeORASRepo(), watch: "stver-default-v1", failTagCount: 1, firstResolve: make(chan struct{})}
-	if err := hook.inner.Tag(ctx, foreign, "stver-default-v1"); err != nil {
+	hook := &hookingRepo{inner: newFakeORASRepo(), watch: stateVersionTagPrefix + workspaceTagFor("default") + "-v1", failTagCount: 1, firstResolve: make(chan struct{})}
+	if err := hook.inner.Tag(ctx, foreign, stateVersionTagPrefix+workspaceTagFor("default")+"-v1"); err != nil {
 		t.Fatalf("seed foreign version tag: %v", err)
 	}
 	wc := newHookedWorkspace(t, hook)
 
-	err := wc.publishMutableTag(ctx, desc, "stver-default-v1")
+	err := wc.publishMutableTag(ctx, desc, stateVersionTagPrefix+workspaceTagFor("default")+"-v1")
 	if !errors.Is(err, ErrMutableTagMoved) {
 		t.Fatalf("error = %v, want errors.Is(err, ErrMutableTagMoved)", err)
 	}
 	if calls := hook.tagCallCount(); calls != 1 {
 		t.Errorf("Tag calls = %d, want exactly 1 (foreign version tag must not be retagged)", calls)
 	}
-	got, resolveErr := hook.inner.Resolve(ctx, "stver-default-v1")
+	got, resolveErr := hook.inner.Resolve(ctx, stateVersionTagPrefix+workspaceTagFor("default")+"-v1")
 	if resolveErr != nil || got.Digest != foreign.Digest {
 		t.Errorf("version tag digest = %v (%v), want foreign %s preserved", got.Digest, resolveErr, foreign.Digest)
 	}
@@ -516,7 +516,7 @@ func TestPublishMutableTagNonTransientSurfaced(t *testing.T) {
 	desc := testDesc("attempt-manifest")
 	errForbidden := errors.New("forbidden (test sentinel)")
 	hook := &hookingRepo{
-		inner: newFakeORASRepo(), watch: "state-default",
+		inner: newFakeORASRepo(), watch: stateTagPrefix + workspaceTagFor("default"),
 		failTagCount: 1, nonTransientTagErr: errForbidden, firstResolve: make(chan struct{}),
 	}
 	wc := newHookedWorkspace(t, hook)

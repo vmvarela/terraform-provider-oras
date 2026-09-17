@@ -18,7 +18,9 @@ const (
 	ghcrTestEnvVar  = "TF_ORAS_GHCR_TEST"
 	ghcrTokenEnvVar = "TF_ORAS_GHCR_TOKEN"
 	ghcrAddr        = "ghcr.io"
-	ghcrRepoPath    = "vmvarela/terraform-provider-oras"
+	// Keep hash-layout tests separate from artifacts left by legacy CI runs.
+	// Reusing the old repository would correctly trigger migration refusal.
+	ghcrRepoPath = "vmvarela/terraform-provider-oras/workspace-hash"
 )
 
 // requireGHCRTest skips the test unless TF_ORAS_GHCR_TEST is set and a
@@ -67,6 +69,14 @@ func TestGHCRIntegration_StateRoundTrip(t *testing.T) {
 	}
 	if data != nil {
 		t.Fatal("expected nil on empty workspace")
+	}
+
+	// Keep another tagged version in this newly isolated test package. GHCR
+	// can reject deleting its last tagged version with HTTP 400. This fixture
+	// must exercise state deletion without attempting to remove the package's
+	// final tagged version; do not weaken the Delete assertion below.
+	if err := c.Put(ctx, "ci-package-anchor", []byte(`{"version":4,"serial":0,"fixture":"retained"}`)); err != nil {
+		t.Fatalf("create retained package fixture: %v", err)
 	}
 
 	stateData := []byte(`{"version":4,"serial":1,"ghcr-integration":true}`)

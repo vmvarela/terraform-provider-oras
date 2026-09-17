@@ -161,9 +161,10 @@ func newRivalLockManifest(ctx context.Context, t *testing.T, repo *fakeORASRepo,
 	infoBytes, _ := json.Marshal(rivalInfo)
 
 	annotations := map[string]string{
-		annotationLockID:   holderID,
-		annotationLockInfo: string(infoBytes),
-		annotationLockGen:  string(lockDataJSON),
+		annotationWorkspace: "default",
+		annotationLockID:    holderID,
+		annotationLockInfo:  string(infoBytes),
+		annotationLockGen:   string(lockDataJSON),
 	}
 
 	// Build a minimal OCI image manifest as a byte payload.
@@ -430,40 +431,15 @@ func TestRemoteClient_WorkspacesFromTags_TagSafeAndHashed(t *testing.T) {
 	}
 }
 
-func TestWorkspaceTagFor_HashesInvalidWorkspaceNames(t *testing.T) {
-	tests := []struct {
-		name     string
-		expected string // empty means expect original unchanged
-	}{
-		{"default", "default"},
-		{"simple", "simple"},
-		{"with-dash", "with-dash"},
-		{"with_underscore", "with_underscore"},
-		{"with.dot", "with.dot"},
-		{"UPPERCASE", "UPPERCASE"},
-		{"a/b", ""},                    // slash not allowed in tags
-		{"has:colon", ""},              // colon not allowed
-		{"has space", ""},              // space not allowed
-		{"has?query", ""},              // question mark not allowed
-		{strings.Repeat("x", 129), ""}, // too long
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := workspaceTagFor(tt.name)
-			if tt.expected != "" {
-				if got != tt.expected {
-					t.Errorf("workspaceTagFor(%q) = %q, want %q", tt.name, got, tt.expected)
-				}
-			} else {
-				// Must be hashed: starts with "ws-".
-				if !strings.HasPrefix(got, "ws-") {
-					t.Errorf("workspaceTagFor(%q) = %q, expected hash (ws-*)", tt.name, got)
-				}
-				if len(got) != 19 { // "ws-" + 16 hex chars
-					t.Errorf("workspaceTagFor(%q) length = %d, want 19", tt.name, len(got))
-				}
-			}
-		})
+func TestWorkspaceTagFor_UniformEncoding(t *testing.T) {
+	for _, name := range []string{"default", "simple", "with-dash", "with_underscore", "with.dot", "UPPERCASE", "a/b", "has:colon", "has space", strings.Repeat("x", 129)} {
+		got := workspaceTagFor(name)
+		if len(got) != 64 {
+			t.Errorf("identifier length = %d, want 64", len(got))
+		}
+		if got == name {
+			t.Errorf("literal workspace bypassed encoding")
+		}
 	}
 }
 
@@ -576,7 +552,7 @@ func TestDelete_GHCRFallbackCallsPackagesAPI(t *testing.T) {
 	ghcrClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if r.Method == http.MethodGet {
 			return fakeGitHubResponse(http.StatusOK,
-				ghcrVersionsBody(map[int64][]string{11: {"state-default"}}, stateDigest)), nil
+				ghcrVersionsBody(map[int64][]string{11: {wc.stateTag}}, stateDigest)), nil
 		}
 		deletePath = r.URL.Path
 		return fakeGitHubResponse(http.StatusNoContent, ""), nil
@@ -1162,9 +1138,10 @@ func pushStaleLock(ctx context.Context, t *testing.T, repo orasRepository, lockT
 		MediaType:    ocispec.MediaTypeImageManifest,
 		ArtifactType: artifactTypeLock,
 		Annotations: map[string]string{
-			annotationLockID:   "stale-lock",
-			annotationLockInfo: string(infoBytes),
-			annotationLockGen:  string(lockDataJSON),
+			annotationWorkspace: "default",
+			annotationLockID:    "stale-lock",
+			annotationLockInfo:  string(infoBytes),
+			annotationLockGen:   string(lockDataJSON),
 		},
 		Layers: []ocispec.Descriptor{},
 	}

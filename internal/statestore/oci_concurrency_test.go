@@ -457,7 +457,7 @@ func TestStateStoreStaleWriteRefused(t *testing.T) {
 	if !strings.Contains(writeResp.Diagnostics[0].Summary(), "no longer held") {
 		t.Errorf("summary = %q, want it to mention the lost lock", writeResp.Diagnostics[0].Summary())
 	}
-	if reg.HasTag("state-default") {
+	if reg.HasTag(testStateTag) {
 		t.Error("state bytes landed despite lost lock")
 	}
 	if !reg.HasTag(testLockTag) {
@@ -719,7 +719,7 @@ func TestStateStoreWriteTOCTOULimitation(t *testing.T) {
 	gate := func(r *http.Request) (<-chan struct{}, int) {
 		// Block only the state-tag manifest PUT (the step that makes A's
 		// bytes visible), after VerifyLock has already passed.
-		if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/manifests/state-default") {
+		if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/manifests/"+testStateTag) {
 			select {
 			case engaged <- struct{}{}:
 			default:
@@ -964,7 +964,7 @@ func TestStateStoreTTLExpiryRefusesStaleWrite(t *testing.T) {
 	if !strings.Contains(writeResp.Diagnostics[0].Detail(), "expired") {
 		t.Errorf("detail = %q, want it to name the expired stored lease", writeResp.Diagnostics[0].Detail())
 	}
-	if reg.HasTag("state-default") {
+	if reg.HasTag(testStateTag) {
 		t.Error("state bytes landed despite an expired stored lease")
 	}
 	// A's local registration must survive the refused write.
@@ -1063,7 +1063,7 @@ func TestStateStoreConcurrentWritesVersionRetention(t *testing.T) {
 	reg.mu.Lock()
 	versionTags := make([]string, 0, len(reg.tagOf))
 	for tag := range reg.tagOf {
-		if strings.HasPrefix(tag, "stver-default-v") {
+		if strings.HasPrefix(tag, testVersionTagPrefix) {
 			versionTags = append(versionTags, tag)
 		}
 	}
@@ -1124,7 +1124,7 @@ func TestStateStoreStateRetryFailClosed(t *testing.T) {
 	observing := make(chan struct{}, 1)
 	release := make(chan struct{})
 	gate := func(r *http.Request) (<-chan struct{}, int) {
-		isStateTag := strings.HasSuffix(r.URL.Path, "/manifests/state-default")
+		isStateTag := strings.HasSuffix(r.URL.Path, "/manifests/"+testStateTag)
 		if !isStateTag {
 			return nil, 0
 		}
@@ -1228,7 +1228,7 @@ func TestStateStoreStateRetryFailClosed(t *testing.T) {
 	if puts != 2 {
 		t.Errorf("state-tag PUT calls = %d, want exactly 2 (A's rejected attempt + B's write); A must not re-apply", puts)
 	}
-	if !reg.HasTag("state-default") {
+	if !reg.HasTag(testStateTag) {
 		t.Error("state tag missing after B's write")
 	}
 }
@@ -1246,7 +1246,7 @@ func TestStateStoreStateRetryFailClosed(t *testing.T) {
 func TestStateStorePartialVersionPublicationFailClosed(t *testing.T) {
 	ctx := context.Background()
 
-	const versionTag = "stver-default-v1"
+	const versionTag = testVersionTagPrefix + "1"
 	var mu sync.Mutex
 	versionPuts := 0
 	versionTagReads := 0
@@ -1333,7 +1333,7 @@ func TestStateStorePartialVersionPublicationFailClosed(t *testing.T) {
 		t.Errorf("summary = %q: a partial publication must not be reported as a whole-write rejection", writeResp.Diagnostics[0].Summary())
 	}
 	detail := writeResp.Diagnostics[0].Detail()
-	if !strings.Contains(detail, "state-default") || !strings.Contains(detail, versionTag) {
+	if !strings.Contains(detail, testStateTag) || !strings.Contains(detail, versionTag) {
 		t.Errorf("detail = %q, want it to name both the published state tag and the failed version tag", detail)
 	}
 
@@ -1517,7 +1517,7 @@ func TestStateStoreWriteExpiryDuringW1Limitation(t *testing.T) {
 	release := make(chan struct{})
 	gate := func(r *http.Request) (<-chan struct{}, int) {
 		// Park only the state-tag manifest PUT (after VerifyLock passed).
-		if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/manifests/state-default") {
+		if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/manifests/"+testStateTag) {
 			select {
 			case engaged <- struct{}{}:
 			default:
@@ -1562,7 +1562,7 @@ func TestStateStoreWriteExpiryDuringW1Limitation(t *testing.T) {
 	if string(readResp.StateBytes) != "expiry-w1-payload" {
 		t.Fatalf("verified-then-expired write did not land: read = %q; W1 may be closed for the expiry case — update the LIMITATION", readResp.StateBytes)
 	}
-	if !reg.HasTag("state-default") {
+	if !reg.HasTag(testStateTag) {
 		t.Error("state tag missing after the in-flight write landed")
 	}
 	if !reg.HasTag(testLockTag) {
