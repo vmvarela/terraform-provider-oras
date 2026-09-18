@@ -24,7 +24,7 @@ import (
 // ProviderData holds provider-level configuration forwarded to state stores
 // via ConfigureResponse.StateStoreData.
 type ProviderData struct {
-	Insecure   bool
+	PlainHTTP  bool
 	HTTPClient *http.Client
 }
 
@@ -248,12 +248,12 @@ func (s *OCIStateStore) Initialize(ctx context.Context, req fwss.InitializeReque
 
 	var orasCfg oras.Config
 
-	// Forward provider-level TLS settings to the ORAS client.
+	// Forward provider-level transport and TLS settings to the ORAS client.
 	if pd, ok := req.ProviderData.(*ProviderData); ok && pd != nil {
 		orasCfg.HTTPClient = pd.HTTPClient
-		// Insecure sets repo.PlainHTTP, required for http:// registries
+		// PlainHTTP sets repo.PlainHTTP, required for http:// registries
 		// (e.g. local Zot). Must be passed even when a custom HTTPClient exists.
-		orasCfg.Insecure = pd.Insecure
+		orasCfg.PlainHTTP = pd.PlainHTTP
 	}
 
 	if !cfg.Compression.IsNull() && !cfg.Compression.IsUnknown() {

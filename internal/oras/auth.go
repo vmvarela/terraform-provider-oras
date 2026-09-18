@@ -18,9 +18,9 @@ import (
 )
 
 // BuildHTTPClient constructs an *http.Client with the specified TLS settings.
-// When insecure is true, certificate verification is disabled.
+// When skipVerify is true, certificate verification is disabled.
 // When caFile is non-empty, it is loaded as the trusted CA pool.
-func BuildHTTPClient(insecure bool, caFile string) (*http.Client, error) {
+func BuildHTTPClient(skipVerify bool, caFile string) (*http.Client, error) {
 	transport, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
 		transport = &http.Transport{}
@@ -30,7 +30,7 @@ func BuildHTTPClient(insecure bool, caFile string) (*http.Client, error) {
 	if t.TLSClientConfig == nil {
 		t.TLSClientConfig = &tls.Config{} //nolint:gosec
 	}
-	t.TLSClientConfig.InsecureSkipVerify = insecure //nolint:gosec // intentional per user config
+	t.TLSClientConfig.InsecureSkipVerify = skipVerify //nolint:gosec // intentional per user config
 
 	if caFile != "" {
 		pem, err := os.ReadFile(caFile)
@@ -61,8 +61,10 @@ func userAgent() string {
 
 // Config holds all configurable options for the ORAS client.
 type Config struct {
-	// Insecure uses plain HTTP (no TLS) when true.
-	Insecure bool
+	// PlainHTTP explicitly selects HTTP instead of HTTPS.
+	PlainHTTP bool
+	// TLSSkipVerify disables HTTPS certificate verification without selecting HTTP.
+	TLSSkipVerify bool
 	// CAFile is the path to a PEM file with custom CA certificates for TLS.
 	CAFile string
 	// Username is the explicit registry username (priority 2 credential).
@@ -80,7 +82,7 @@ type Config struct {
 	// MaxStateSize is the upper bound on state data; <= 0 uses the 256 MiB default.
 	MaxStateSize int64
 	// HTTPClient is an optional pre-configured HTTP client; one is built from
-	// Insecure/CAFile when nil.
+	// TLSSkipVerify/CAFile when nil.
 	HTTPClient *http.Client
 }
 
@@ -158,7 +160,7 @@ func newORASRepositoryClient(registry, repository string, cfg Config) (*orasRepo
 		return nil, fmt.Errorf("failed to create remote repository: %w", err)
 	}
 
-	if cfg.Insecure {
+	if cfg.PlainHTTP {
 		repo.PlainHTTP = true
 	}
 
@@ -169,7 +171,7 @@ func newORASRepositoryClient(registry, repository string, cfg Config) (*orasRepo
 		cloned := *cfg.HTTPClient
 		httpClient = &cloned
 	} else {
-		httpClient, err = BuildHTTPClient(cfg.Insecure, cfg.CAFile)
+		httpClient, err = BuildHTTPClient(cfg.TLSSkipVerify, cfg.CAFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create HTTP client: %w", err)
 		}

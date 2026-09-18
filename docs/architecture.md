@@ -64,8 +64,11 @@ validation (beyond the table):
 
 Validation runs in `ValidateConfig` and is defensively re-run in `Initialize`
 (`oci.go:152-201`, 235) — an unparseable `lock_ttl` is an error, never a silent
-zero. Provider-level `insecure`/`ca_file` flow through `ProviderData`
-(`provider.go:106-123`).
+zero. Provider-level `plain_http` selects the transport independently of
+`tls_skip_verify`/`ca_file`, which configure the shared HTTP client. Both flow
+through `ProviderData` from provider `Configure` to state store `Initialize`.
+Legacy `insecure` retains its old behavior and is deprecated; see the
+[transport upgrade instructions](guides/authentication.md#upgrade-from-insecure).
 
 ## 4. Workspace → OCI mapping
 

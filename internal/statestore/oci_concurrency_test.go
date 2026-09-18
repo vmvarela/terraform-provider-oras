@@ -125,7 +125,7 @@ func newConfiguredStore(t *testing.T, lockTTL, baseURL string, maxVersions int64
 	initResp := &fwss.InitializeResponse{}
 	(&OCIStateStore{}).Initialize(ctx, fwss.InitializeRequest{
 		Config:       storeConfig(overrides),
-		ProviderData: &ProviderData{Insecure: true},
+		ProviderData: &ProviderData{PlainHTTP: true},
 	}, initResp)
 	if initResp.Diagnostics.HasError() {
 		t.Fatalf("initialize: %v", initResp.Diagnostics)
