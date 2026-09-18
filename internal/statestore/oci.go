@@ -128,7 +128,7 @@ func (s *OCIStateStore) Schema(_ context.Context, _ fwss.SchemaRequest, resp *fw
 			},
 			"lock_ttl": ssschema.StringAttribute{
 				Optional:            true,
-				MarkdownDescription: "Duration for state lock TTL (e.g., `15m`, `1h`). With a positive TTL, a lock whose lease has expired is stale and is cleared by the next Lock call that reaches the registry. There is no background reaper: stale locks are not cleaned until someone attempts a Lock. Defaults to unset/`0`, which means locks never expire and a crashed holder must be cleared manually.",
+				MarkdownDescription: "Non-renewing state lock lease duration (e.g., `15m`, `1h`), measured using local wall clocks. An apply that outlasts a positive TTL can change infrastructure and then fail to save state. Expired locks are cleared only by a subsequent eligible Lock call; there is no background renewal or reaper. Defaults to unset/`0`: locks never expire and crashed holders require manual recovery. See the state recovery guide before retrying a failed write.",
 			},
 			"max_versions": ssschema.Int64Attribute{
 				Optional:            true,
@@ -346,58 +346,61 @@ func (s *OCIStateStore) Write(ctx context.Context, req fwss.WriteRequest, resp *
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				resp.Diagnostics.AddError(
 					"State write interrupted",
-					fmt.Sprintf("Verifying the lock for workspace %q was interrupted before ownership could be confirmed: %v. Re-run the operation with a fresh lock.",
-						req.StateID, err),
+					fmt.Sprintf("Verifying the lock for workspace %q was interrupted before ownership could be confirmed: %v. This write did not attempt state publication. %s",
+						req.StateID, err, stateRecoveryGuidance),
 				)
 				return
 			}
 			resp.Diagnostics.AddError(
 				"State lock no longer held",
-				fmt.Sprintf("Refusing to write state for workspace %q: the lock held by this operation is no longer valid (%v). Another client may have taken over; re-run the operation to acquire a fresh lock.",
-					req.StateID, err),
+				fmt.Sprintf("Refusing to write state for workspace %q: the lock held by this operation is no longer valid (%v). This write did not attempt state publication; infrastructure may already have changed and another writer may have taken over. %s",
+					req.StateID, err, stateRecoveryGuidance),
 			)
 			return
 		}
 	}
 
 	if err := s.client.Put(ctx, req.StateID, req.StateBytes); err != nil {
-		// Cancellation/deadline first: the operation was interrupted, and the
-		// caller must see that rather than a publication-conflict framing.
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			resp.Diagnostics.AddError(
-				"State write interrupted",
-				fmt.Sprintf("Writing state for workspace %q was interrupted before it could be confirmed: %v. Re-run the operation with a fresh lock.",
-					req.StateID, err),
-			)
-			return
-		}
-		var partial *oras.PartialPublicationError
-		if errors.As(err, &partial) {
-			// The state tag published successfully; only the version-tag
-			// publication failed/conflicted. The state is visible and
-			// readable — do NOT tell the caller the write was wholly rejected.
-			resp.Diagnostics.AddError(
-				"State version publication failed",
-				fmt.Sprintf("State for workspace %q was published successfully under tag %q, but publishing the version tag %q failed (%v). The state is readable; the version metadata for this write may be missing, and the failed version tag was left untouched (it may belong to another writer). Re-run the operation with a fresh lock to publish the next version.",
-					req.StateID, partial.StateTag, partial.VersionTag, partial.Err),
-			)
-			return
-		}
-		if errors.Is(err, oras.ErrMutableTagMoved) {
-			// A transient write failure left the state tag's ownership
-			// ambiguous: the publication failed closed instead of blindly
-			// re-applying over a possibly newer state. Note this does NOT
-			// mean the lock was proven lost — the ordinary verify→Put
-			// TOCTOU window remains (oci_concurrency_test.go, Test 9).
-			resp.Diagnostics.AddError(
-				"State publication conflict",
-				fmt.Sprintf("Refusing to publish state for workspace %q: the state tag could not be confirmed as ours after a transient write failure (%v). Another client may have published newer state; the write failed closed rather than overwrite it. Re-run the operation with a fresh lock and write again.",
-					req.StateID, err),
-			)
-			return
-		}
-		resp.Diagnostics.AddError("Failed to write state", err.Error())
+		addPublicationDiagnostic(&resp.Diagnostics, req.StateID, err)
 	}
+}
+
+const stateRecoveryGuidance = "Do not blindly re-apply. Stop other writers, securely preserve any Terraform recovery state (such as errored.tfstate), and inspect remote state before recovery. Compare lineage, serial and resource identities; only push reconciled state with a fresh lock. See docs/guides/state-recovery.md."
+
+// A partial error confirms state publication even when its version step was
+// cancelled. Other interrupted writes remain uncertain, not wholly rejected.
+func addPublicationDiagnostic(diags *diag.Diagnostics, stateID string, err error) {
+	var partial *oras.PartialPublicationError
+	if errors.As(err, &partial) {
+		diags.AddError(
+			"State version publication failed",
+			fmt.Sprintf("State for workspace %q was published successfully under tag %q, but publishing the version tag %q failed (%v). State publication was confirmed; inspect the current state because another writer may since have replaced it. Version publication may be incomplete. %s",
+				stateID, partial.StateTag, partial.VersionTag, partial.Err, stateRecoveryGuidance),
+		)
+		return
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		diags.AddError(
+			"State write interrupted",
+			fmt.Sprintf("Writing state for workspace %q was interrupted before it could be confirmed: %v. Publication is uncertain; state may already have been written. %s",
+				stateID, err, stateRecoveryGuidance),
+		)
+		return
+	}
+	if errors.Is(err, oras.ErrMutableTagMoved) {
+		// A transient write failure left the state tag's ownership
+		// ambiguous: the publication failed closed instead of blindly
+		// re-applying over a possibly newer state. Note this does NOT
+		// mean the lock was proven lost — the ordinary verify→Put
+		// TOCTOU window remains (oci_concurrency_test.go, Test 9).
+		diags.AddError(
+			"State publication conflict",
+			fmt.Sprintf("State publication for workspace %q could not be confirmed after a transient write failure (%v). Publication is uncertain; another client may have published newer state. The tag was not blindly re-applied. %s",
+				stateID, err, stateRecoveryGuidance),
+		)
+		return
+	}
+	diags.AddError("Failed to write state", fmt.Sprintf("State publication for workspace %q was not confirmed (%v). Inspect remote state; do not assume nothing was written. %s", stateID, err, stateRecoveryGuidance))
 }
 
 // DeleteState removes the state for the given StateID from the OCI registry.

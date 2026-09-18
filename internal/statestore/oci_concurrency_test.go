@@ -964,6 +964,11 @@ func TestStateStoreTTLExpiryRefusesStaleWrite(t *testing.T) {
 	if !strings.Contains(writeResp.Diagnostics[0].Detail(), "expired") {
 		t.Errorf("detail = %q, want it to name the expired stored lease", writeResp.Diagnostics[0].Detail())
 	}
+	for _, required := range []string{"did not attempt state publication", "Do not blindly re-apply", "errored.tfstate"} {
+		if !strings.Contains(writeResp.Diagnostics[0].Detail(), required) {
+			t.Errorf("expired-lease diagnostic missing %q", required)
+		}
+	}
 	if reg.HasTag(testStateTag) {
 		t.Error("state bytes landed despite an expired stored lease")
 	}
@@ -1398,6 +1403,9 @@ func TestStateStoreWriteVerifyLockInterrupted(t *testing.T) {
 	}
 	if strings.Contains(summary, "no longer held") {
 		t.Errorf("summary = %q: a cancelled ownership check must not be framed as a lost lock", summary)
+	}
+	if !strings.Contains(writeResp.Diagnostics[0].Detail(), "did not attempt state publication") {
+		t.Error("pre-publication cancellation must be distinguished from an uncertain Put")
 	}
 	// The cancelled write must not register or drop anything.
 	if id, ok := ssd.lockFor("default"); !ok || id != lockResp.LockID {

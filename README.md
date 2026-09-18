@@ -43,6 +43,9 @@ terraform init && terraform apply
 Full configuration reference, storage layout, and locking semantics: [`docs/index.md`](docs/index.md).
 Architecture, consistency guarantees, and failure behavior: [`docs/architecture.md`](docs/architecture.md).
 Credential resolution: [`docs/guides/authentication.md`](docs/guides/authentication.md).
+Failed state writes and non-renewing leases: [`docs/guides/state-recovery.md`](docs/guides/state-recovery.md).
+An apply can change infrastructure before an expired lease prevents saving state;
+preserve recovery state and inspect the remote snapshot before retrying.
 
 ## Workspace layout upgrade
 

@@ -76,7 +76,7 @@ A runnable version lives in [`examples/main.tf`](../examples/main.tf).
 |------------------|:--------:|-----------------------|-------------|
 | `url`            | ✓        | —                     | `oci://<registry>/<repository>`; registry may include a port |
 | `compression`    |          | `false`               | Gzip the state layer |
-| `lock_ttl`       |          | —                     | Go duration (`15m`, `1h`); stale locks past this lease are cleared on the next `Lock`. Unset means locks never expire |
+| `lock_ttl`       |          | —                     | Non-renewing lease (`15m`, `1h`), based on local clocks. Expiry can refuse state persistence after infrastructure changes. Unset/`0` means locks never expire |
 | `max_versions`   |          | `0` (versioning disabled) | Versions retained per workspace. `1` keeps only the current state; `0` keeps no version tags, allocates no versions, and prunes nothing |
 | `max_state_size` |          | `268435456` (256 MiB) | Hard read/write limit; guards against a corrupted or malicious layer |
 
@@ -125,6 +125,11 @@ OCI tags are last-writer-wins: the OCI Distribution spec has no portable compare
 `lock_ttl` recovers orphaned locks: a lock whose stored lease has expired (`lease_expiry > 0`) is cleared on the next `Lock` attempt (no background goroutines). Unset means locks never expire, and a crashed client blocks the workspace until someone releases it. Note: a lock written while `lock_ttl` was unset has no lease timestamp, so enabling `lock_ttl` later does not clear it — it stays until manually released.
 
 Running Terraform with `-lock=false` never calls `Lock`, so no lock is registered and writes proceed without the ownership verification described above.
+
+Positive leases are not automatically renewed. Before retrying a failed write,
+preserve any recovery snapshot and inspect remote state; do not blindly repeat
+an apply. See [state write recovery](guides/state-recovery.md) for rejected,
+uncertain and partial publication outcomes and the pinned Terraform experiment.
 
 ## Version Retention
 
