@@ -241,6 +241,14 @@ check on the next `Lock`. Two hard limits remain: the expiry comparison is
 before expiry whose lease expires during the in-flight Put still lands
 (W1 unchanged, `TestStateStoreWriteExpiryDuringW1Limitation`).
 
+Leases are not renewed. A long apply can modify infrastructure and subsequently
+fail persistence. [State write recovery](guides/state-recovery.md) documents the
+pinned Terraform/Zot experiment, recovery artifacts and operator procedure.
+Write diagnostics distinguish rejection before publication, uncertainty after
+Put starts, and confirmed state publication with failed version publication.
+The partial outcome remains partial even if its version step was cancelled;
+no diagnostic recommends blindly repeating an apply.
+
 All verify→write windows are non-atomic (tags are mutable, unordered, plain
 PUTs). Additionally, `Write` verifies ownership **once, before the first Put
 attempt** (`oci.go:341-353`); the Put path keeps that property: content-addressed

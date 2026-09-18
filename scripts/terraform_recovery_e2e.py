@@ -70,8 +70,9 @@ def main():
 
         env = {k: v for k, v in os.environ.items()
                if not k.startswith(("TF_", "ORAS_", "GHCR_", "GITHUB_", "DOCKER_"))}
-        # Isolate credential discovery and prevent logging state/credentials.
-        env.update(HOME=str(root), XDG_CONFIG_HOME=str(root / "config"),
+        # A synthetic explicit token bypasses real Docker/helper credentials.
+        # Zot is anonymous; no real tokens are needed. Keep the user's HOME intact.
+        env.update(ORAS_TOKEN="synthetic-e2e-token", XDG_CONFIG_HOME=str(root / "config"),
                    TF_ENABLE_PLUGGABLE_STATE_STORAGE="1", TF_IN_AUTOMATION="1",
                    TF_INPUT="0", CHECKPOINT_DISABLE="1", NO_PROXY="localhost,127.0.0.1")
         rc = root / "terraform.rc"
@@ -163,10 +164,12 @@ output "value" { value = terraform_data.effect.output }
         stdout, stderr = apply(expiry, "after", delay=8, expected=1)
         diagnostics = stdout + stderr
         require(b"State lock no longer held" in diagnostics, "Missing expired-lock diagnostic")
+        require(b"expired" in diagnostics, "Write failed for a reason other than lease expiry")
         require(b"errored.tfstate" in diagnostics, "Missing recovery artifact diagnostic")
         require((expiry / "effect.txt").read_text() == "after", "External effect did not occur")
         recovery = expiry / "errored.tfstate"
         require(recovery.is_file(), "Terraform did not save a recovery artifact")
+        require(recovery.stat().st_mode & 0o077 == 0, "Recovery artifact permissions are too broad")
         recovered = json.loads(recovery.read_bytes())
         check_state(recovered, "after")
         require(recovered["lineage"] == before["lineage"], "Recovery lineage differs")
@@ -182,6 +185,8 @@ output "value" { value = terraform_data.effect.output }
         check_state(restored, "after")
         require(restored["lineage"] == recovered["lineage"], "Restored lineage differs")
         require(restored["serial"] >= recovered["serial"], "Restored serial regressed")
+        require(restored["resources"] == recovered["resources"], "Restored resource identities differ")
+        require(restored["outputs"] == recovered["outputs"], "Restored outputs differ")
         tf(expiry, "plan", "-input=false", "-no-color", "-detailed-exitcode",
            "-var=value=after", "-var=delay=0")
         print("PASS recovery: state push without force/unlocked writes -> reread -> no-change plan", flush=True)

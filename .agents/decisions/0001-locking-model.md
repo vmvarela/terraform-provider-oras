@@ -46,6 +46,18 @@ rather than preventing it.
 - GHCR 405 fallback evidence is simulated/unit-tested (`deleteUnsupportedRepo`) plus conditional env-gated integration (`TF_ORAS_GHCR_TEST`); not portable, and a live run does not necessarily exercise the 405 branch.
 - Behavior on registries other than ghcr.io and zot is untested and registry-specific.
 
+## Recovery diagnostic refinement (#41)
+
+Leases remain non-renewing and all concurrency limitations above remain.
+The Write diagnostic mapping now preserves a confirmed partial publication
+even when the subsequent version-tag step is cancelled; this refines the
+cancellation-priority wording above. Other interrupted publications remain
+uncertain. No error recommends blindly re-applying infrastructure changes.
+`TestStateStoreCancelledVersionStillReportsPartial` injects cancellation after
+state publication and verifies the state remains readable. The pinned
+Terraform/Zot experiment and recovery procedure are recorded in
+`docs/guides/state-recovery.md` and `scripts/terraform_recovery_e2e.py`.
+
 ## Verification
 Property-proving tests — unit (`internal/oras`): `LockContentionAndUnlockMismatch`, `LockTTL_ClearsStaleLock` (+ `DeleteUnsupportedFallback` variant), `VerifyLock` + `RivalHolder` + `UnlockedMarker`, `CleanupRunsOnCancelledContext`, `RaceConditionDetection`, `LateRivalDetectedByStabilityRead`, 3x `RetagToUnlocked_*`, `SameGenerationRaceDetectedByHolderID`, `ForeignManifestIsVerificationFailure`, `LockWithGenerationDetection`, `StaleLockCleanupRaceCondition`, `UnlockFallbackWhenDeleteUnsupported`.
 Unit (`internal/statestore`): `LockUnlockWriteLifecycle`, `WriteRefusedWhenLockLost`, `LockContention`, `UnlockEmptyLockID`, `UnlockWrongLockID`, `ForgetLockIfKeepsNewerAcquisition`, `StateStoreDataConcurrentAccess`.
