@@ -162,22 +162,9 @@ jobs:
       - name: Build provider
         run: go build -o terraform-provider-oras .
 
-      - name: Run Terraform init & apply
-        env:
-          TF_ENABLE_PLUGGABLE_STATE_STORAGE: "1"
-        working-directory: examples
-        run: |
-          # Create terraform.rc to use local provider
-          cat > terraform.rc <<EOF
-          provider_installation {
-            dev_overrides {
-              "vmvarela/oras" = "${{ github.workspace }}"
-            }
-            direct {}
-          }
-          EOF
-          TF_CLI_CONFIG_FILE="$PWD/terraform.rc" terraform init -upgrade
-          TF_CLI_CONFIG_FILE="$PWD/terraform.rc" terraform apply -auto-approve -input=false
+      - name: Verify Terraform persistence and expired-lease recovery
+        # The harness captures output privately; never upload state or raw logs.
+        run: python3 scripts/terraform_recovery_e2e.py --provider-dir "$GITHUB_WORKSPACE" --registry localhost:5001
 
       - name: Cleanup
         if: always()
