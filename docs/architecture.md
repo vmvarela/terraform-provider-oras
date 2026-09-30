@@ -101,26 +101,8 @@ racing after validation. The limitations below still apply.
 
 ## 5. Storage: current & historical
 
-State and lock manifests are OCI image manifests packed with
-`PackManifest v1_1` (`client.go:646,665`):
-
-| Object | Artifact type | Annotations | Layers |
-|---|---|---|---|
-| State (`client.go:638-650`) | `application/vnd.terraform.state.v1` | workspace, `updated_at` (always), `state.version` (when > 0) | single layer, `application/vnd.terraform.statefile.v1` (`+gzip` when compressed) |
-| Lock (`client.go:654-673`) | `application/vnd.terraform.lock.v1` | workspace, lock ID, lock info (JSON), generation data | none |
-
-The lock's generation metadata (`generation`, `lease_expiry`, `holder_id`) is
-a JSON blob in the `org.terraform.lock.generation` annotation
-(key `client.go:48`, struct `client.go:135-140`, written `client.go:670`).
-
-Versioning (`max_versions > 0` only, `client.go:288-295`):
-- Current version read: state-manifest `state.version` annotation preferred;
-  fall back to max `stver-*` tag; missing state manifest ⇒ 0
-  (`client.go:683-708`).
-- Allocation: `next = current + 1`; the new manifest is tagged both
-  `state-<ws>` (`client.go:307`) and `stver-<ws>-v<N>` (`client.go:315-318`).
-- Deletion (`DeleteState`) resolves and deletes only the `state-<ws>` digest
-  (`client.go:375-387`); `stver-*` version tags and lock tags are left untouched.
+Manifests, annotations, media types, version allocation, deletion and
+retention are specified in [OCI storage format](storage-format.md).
 
 ## 6. Versioning & allocation race
 
