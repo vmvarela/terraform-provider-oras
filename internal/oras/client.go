@@ -84,6 +84,10 @@ const (
 	stateVersionTagSeparator = "-v"
 )
 
+// maxStateVersion bounds version numbers (32-bit safe); tags beyond it are
+// not recognized as version tags.
+const maxStateVersion = 1 << 30
+
 // ─── Exported types ───────────────────────────────────────────────────────────
 
 // LockInfo holds information about a state lock.
@@ -345,6 +349,15 @@ func (wc *workspaceClient) put(ctx context.Context, state []byte) error {
 			return err
 		}
 		nextVersion = v
+		if nextVersion > maxStateVersion {
+			return fmt.Errorf("state version %d exceeds the supported maximum of %d", nextVersion, maxStateVersion)
+		}
+		// Verify on use (ADR-0002 Amendment 1): an existing destination
+		// version tag must belong to this workspace before it is overwritten.
+		// Checked before publishing state; not atomic with the Tag below.
+		if _, _, err := wc.fetchManifestWithDesc(ctx, wc.versionTagFor(nextVersion)); err != nil && !isNotFound(err) {
+			return err
+		}
 	}
 
 	layerDesc, err := retryWithResult(ctx, func(ctx context.Context) (ocispec.Descriptor, error) {
@@ -411,7 +424,7 @@ func (wc *workspaceClient) put(ctx context.Context, state []byte) error {
 			defer func() { <-sem }()
 			asyncCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			existing, listErr := wc.listExistingVersions(asyncCtx)
+			existing, listErr := wc.verifiedVersions(asyncCtx)
 			if listErr != nil {
 				slog.Warn("async retention: failed to list versions", "workspace", wc.stateID, "tag", wc.stateTag, "error", listErr)
 				return
@@ -927,11 +940,11 @@ func (wc *workspaceClient) currentStateVersion(ctx context.Context) (int, error)
 	}
 	if v, ok := fm.Annotations[annotationStateVersion]; ok {
 		n, parseErr := strconv.Atoi(v)
-		if parseErr == nil && n > 0 {
+		if parseErr == nil && n > 0 && n <= maxStateVersion {
 			return n, nil
 		}
 	}
-	existing, listErr := wc.listExistingVersions(ctx)
+	existing, listErr := wc.verifiedVersions(ctx)
 	if listErr != nil {
 		return 0, listErr
 	}
@@ -942,6 +955,30 @@ func (wc *workspaceClient) currentStateVersion(ctx context.Context) (int, error)
 		}
 	}
 	return max, nil
+}
+
+// verifiedVersions returns the workspace's version numbers after checking
+// each version manifest's original-name annotation. The preflight does not
+// read version manifests (ADR-0002 Amendment 1), so paths that trust version
+// numbers (allocation fallback, retention cutoff) verify them first. A tag
+// deleted concurrently is skipped; any other failure is returned.
+func (wc *workspaceClient) verifiedVersions(ctx context.Context) ([]int, error) {
+	versions, err := wc.listExistingVersions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	verified := versions[:0]
+	for _, v := range versions {
+		_, _, err := wc.fetchManifestWithDesc(ctx, wc.versionTagFor(v))
+		if isNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		verified = append(verified, v)
+	}
+	return verified, nil
 }
 
 func (wc *workspaceClient) listExistingVersions(ctx context.Context) ([]int, error) {
@@ -1348,8 +1385,9 @@ func splitStateVersionTag(tag string) (base string, version int, ok bool) {
 	}
 	s := tag[idx+len(stateVersionTagSeparator):]
 	v, err := strconv.Atoi(s)
-	// Version numbers are bounded to 1<<30 to prevent overflow on 32-bit systems.
-	if err != nil || v <= 0 || v > 1<<30 {
+	// Version numbers are bounded to prevent overflow on 32-bit systems;
+	// only the canonical form counts ("-v02" must not alias "-v2").
+	if err != nil || v <= 0 || v > maxStateVersion || strconv.Itoa(v) != s {
 		return "", 0, false
 	}
 	return base, v, true

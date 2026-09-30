@@ -84,16 +84,40 @@ of the name length:
 | Unlocked marker | `unlocked-<sha256>` |
 
 The exact original name is required in `org.terraform.workspace` on every
-state and lock manifest. Before every public operation, reserved tags and
-annotations are checked together across the repository. Legacy, mixed or
-ambiguous layouts are rejected. Listing never guesses a missing name.
+state and lock manifest. Before every public operation, every reserved tag in
+the repository is checked **by name**: a tag whose identifier is not a
+64-character digest is a legacy layout, and a legacy or mixed repository is
+rejected. Only the requested workspace's own `state-`, `locked-` and
+`unlocked-` manifests have their annotation read. The annotation must hash to
+the tag identifier. `stver-*` manifests are verified **on use**, wherever
+their numbers or digests are trusted:
+
+- before overwriting an existing destination version tag in `Put`;
+- in the allocation fallback when the state lacks a version annotation;
+- by asynchronous retention, which verifies every version before choosing
+  the keep/delete cutoff (a tag moved after that check is the usual
+  non-atomic window).
+
+A mismatched version therefore fails that write or skips pruning; it never
+deletes another workspace's manifest. Listing reads every reserved annotation
+and never guesses a missing name. Corruption of a workspace's mutable tags
+blocks that workspace and `GetStates`, not unrelated workspaces. Corrupted
+*history* only surfaces when that history is used, so reads and locks of the
+workspace itself can still succeed.
 Migration requires stopped writers and a separate empty repository; see
 [workspace migration](guides/workspace-migration.md) and
 [ADR-0002](../.agents/decisions/0002-workspace-identifiers.md).
 
-These preflights add tag enumeration and metadata reads proportional to
-retained history. They do not make subsequent writes atomic or fence old
-binaries racing after validation. The limitations below still apply.
+Per operation, the preflight costs one tag listing plus at most three
+manifest reads, whatever the number of workspaces or retained versions
+(`TestWorkspacePreflightCallsBounded`, #48). A versioned `Put` adds one
+destination check. The background retention reads each retained version
+manifest. Trade-off: a repository whose only legacy tags are 64-character
+literal names of *other* workspaces is rejected by listing and by operations
+on that workspace's mutable tags, not by operations on unrelated workspaces.
+The preflight and the on-use checks do not make subsequent writes atomic or
+fence old binaries racing after validation. The limitations below still
+apply.
 
 ## 5. Storage: current & historical
 
