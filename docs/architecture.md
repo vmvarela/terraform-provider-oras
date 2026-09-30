@@ -84,16 +84,20 @@ of the name length:
 | Unlocked marker | `unlocked-<sha256>` |
 
 The exact original name is required in `org.terraform.workspace` on every
-state and lock manifest. Before every public operation, reserved tags and
-annotations are checked together across the repository. Legacy, mixed or
-ambiguous layouts are rejected. Listing never guesses a missing name.
+state and lock manifest. Before every public operation, every reserved tag in
+the repository is checked **by name** (a non-64-character identifier means a
+legacy or mixed layout, which is rejected). Only the requested workspace's
+`state-`, `locked-` and `unlocked-` annotations are read and must hash to the
+tag identifier. `stver-*` manifests are verified **on use** (versioned `Put`,
+allocation fallback, retention cutoff), so a mismatched version fails that
+write or skips pruning. It never deletes another workspace's manifest.
+Listing reads every reserved annotation and never guesses a missing name.
+Cost, trade-offs and tests: [ADR-0002 Amendment 1](../.agents/decisions/0002-workspace-identifiers.md).
 Migration requires stopped writers and a separate empty repository; see
-[workspace migration](guides/workspace-migration.md) and
-[ADR-0002](../.agents/decisions/0002-workspace-identifiers.md).
+[workspace migration](guides/workspace-migration.md).
 
-These preflights add tag enumeration and metadata reads proportional to
-retained history. They do not make subsequent writes atomic or fence old
-binaries racing after validation. The limitations below still apply.
+These checks do not make subsequent writes atomic or fence old binaries
+racing after validation. The limitations below still apply.
 
 ## 5. Storage: current & historical
 

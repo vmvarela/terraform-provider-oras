@@ -5,15 +5,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	orasRegistry "oras.land/oras-go/v2/registry"
 )
 
 func TestWorkspaceMappingRegression(t *testing.T) {
+	if _, _, ok := splitStateVersionTag("stver-x-v02"); ok {
+		t.Error("non-canonical version suffix accepted")
+	}
 	if workspaceTagFor("a/b") == workspaceTagFor("ws-c14cddc033f64b9d") {
 		t.Error("distinct workspaces share an identifier")
 	}
@@ -175,7 +182,7 @@ func TestWorkspaceRejectsLegacyRepository(t *testing.T) {
 }
 
 func TestWorkspaceRejectsMismatchedIdentity(t *testing.T) {
-	for _, kind := range []string{"state", "lock", "marker", "version"} {
+	for _, kind := range []string{"state", "lock", "marker"} {
 		t.Run(kind, func(t *testing.T) {
 			ctx := context.Background()
 			fake := newFakeORASRepo()
@@ -185,7 +192,7 @@ func TestWorkspaceRejectsMismatchedIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			tag := map[string]string{"state": wc.stateTag, "lock": wc.lockTag, "marker": wc.unlockedTag, "version": wc.versionTagFor(1)}[kind]
+			tag := map[string]string{"state": wc.stateTag, "lock": wc.lockTag, "marker": wc.unlockedTag}[kind]
 			if err := fake.Tag(ctx, desc, tag); err != nil {
 				t.Fatal(err)
 			}
@@ -209,9 +216,230 @@ func TestWorkspaceRejectsMismatchedIdentity(t *testing.T) {
 
 type workspaceScanFailure struct{ delegatingRepo }
 
+// Paths that trust version numbers must verify version manifests first:
+// the preflight no longer reads them (ADR-0002 Amendment 1).
+func TestWorkspaceUnverifiedVersionsNotTrusted(t *testing.T) {
+	ctx := context.Background()
+	setup := func(t *testing.T) (*fakeORASRepo, *Client, *workspaceClient, ocispec.Descriptor) {
+		t.Helper()
+		fake := newFakeORASRepo()
+		c := newTestClient(&orasRepositoryClient{inner: fake})
+		if err := c.Put(ctx, "other", []byte("other state")); err != nil {
+			t.Fatal(err)
+		}
+		foreign, err := fake.Resolve(ctx, newWorkspaceClient(c, "other").stateTag)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fake, c, newWorkspaceClient(c, "default"), foreign
+	}
+	mustTag := func(t *testing.T, fake *fakeORASRepo, desc ocispec.Descriptor, tag string) {
+		t.Helper()
+		if err := fake.Tag(context.Background(), desc, tag); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wantState := func(t *testing.T, c *Client, ws, want string) {
+		t.Helper()
+		if data, err := c.Get(ctx, ws); err != nil || string(data) != want {
+			t.Fatalf("%s state = %q, %v; want %q", ws, data, err, want)
+		}
+	}
+
+	t.Run("destination overwrite", func(t *testing.T) {
+		// No state yet: allocation restarts at v1, which holds a foreign manifest.
+		fake, c, wc, foreign := setup(t)
+		mustTag(t, fake, foreign, wc.versionTagFor(1))
+		c.config.MaxVersions = 1
+		if err := c.Put(ctx, "default", []byte("new")); err == nil || !strings.Contains(err.Error(), "identity mismatch") {
+			t.Fatalf("put = %v", err)
+		}
+		if got, err := fake.Resolve(ctx, wc.versionTagFor(1)); err != nil || got.Digest != foreign.Digest {
+			t.Fatal("foreign version tag overwritten")
+		}
+		wantState(t, c, "default", "")
+	})
+
+	t.Run("allocation fallback", func(t *testing.T) {
+		// A state without a version annotation falls back to version tags.
+		fake, c, wc, foreign := setup(t)
+		if err := c.Put(ctx, "default", []byte("v0")); err != nil {
+			t.Fatal(err)
+		}
+		mustTag(t, fake, foreign, wc.versionTagFor(7))
+		c.config.MaxVersions = 1
+		if err := c.Put(ctx, "default", []byte("new")); err == nil || !strings.Contains(err.Error(), "identity mismatch") {
+			t.Fatalf("put = %v", err)
+		}
+		wantState(t, c, "default", "v0")
+	})
+
+	t.Run("allocation bound", func(t *testing.T) {
+		fake, c, wc, _ := setup(t)
+		if err := c.Put(ctx, "default", []byte("v0")); err != nil {
+			t.Fatal(err)
+		}
+		own, err := fake.Resolve(ctx, wc.stateTag)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustTag(t, fake, own, wc.versionTagFor(maxStateVersion))
+		// An out-of-range annotation must not wrap the allocation around.
+		fm, _, err := wc.fetchManifestWithDesc(ctx, wc.stateTag)
+		if err != nil {
+			t.Fatal(err)
+		}
+		huge, err := wc.packStateManifest(ctx, fm.Layers, math.MaxInt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustTag(t, fake, huge, wc.stateTag)
+		c.config.MaxVersions = 1
+		if err := c.Put(ctx, "default", []byte("new")); err == nil || !strings.Contains(err.Error(), "exceeds the supported maximum") {
+			t.Fatalf("put = %v", err)
+		}
+		wantState(t, c, "default", "v0")
+	})
+
+	t.Run("retention cutoff", func(t *testing.T) {
+		// A foreign high version must not push legitimate versions out.
+		fake, c, wc, foreign := setup(t)
+		c.config.MaxVersions = 2
+		for _, data := range []string{"d1", "d2"} {
+			if err := c.Put(ctx, "default", []byte(data)); err != nil {
+				t.Fatal(err)
+			}
+			c.WaitForRetention()
+		}
+		mustTag(t, fake, foreign, wc.versionTagFor(100))
+		if err := c.Put(ctx, "default", []byte("d3")); err != nil {
+			t.Fatal(err)
+		}
+		c.WaitForRetention()
+		for _, v := range []int{1, 2} {
+			if _, err := fake.Resolve(ctx, wc.versionTagFor(v)); err != nil {
+				t.Fatalf("legitimate version v%d pruned by a foreign cutoff: %v", v, err)
+			}
+		}
+		wantState(t, c, "other", "other state")
+		wantState(t, c, "default", "d3")
+	})
+
+	t.Run("retention delete set", func(t *testing.T) {
+		// A foreign old version must not make retention delete a digest
+		// that backs another workspace's state; nor block the workspace.
+		fake, c, wc, foreign := setup(t)
+		c.config.MaxVersions = 1
+		for _, data := range []string{"d1", "d2"} {
+			if err := c.Put(ctx, "default", []byte(data)); err != nil {
+				t.Fatal(err)
+			}
+			c.WaitForRetention()
+		}
+		mustTag(t, fake, foreign, wc.versionTagFor(1))
+		if _, err := c.Lock(ctx, "default", LockInfo{ID: "me"}); err != nil {
+			t.Fatalf("lock blocked by an unused version tag: %v", err)
+		}
+		if err := c.Put(ctx, "default", []byte("d3")); err != nil {
+			t.Fatal(err)
+		}
+		c.WaitForRetention()
+		if got, err := fake.Resolve(ctx, wc.versionTagFor(1)); err != nil || got.Digest != foreign.Digest {
+			t.Fatal("foreign version object mutated")
+		}
+		wantState(t, c, "other", "other state")
+		wantState(t, c, "default", "d3")
+	})
+}
+
+// A corrupted workspace must not block unrelated workspaces; List, which
+// reports every name, still fails closed.
+func TestWorkspaceForeignIdentityMismatchIsolated(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeORASRepo()
+	c := newTestClient(&orasRepositoryClient{inner: fake})
+	desc, err := newWorkspaceClient(c, "impostor").packLockManifest(ctx, "", 0, 0, "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fake.Tag(ctx, desc, newWorkspaceClient(c, "corrupted").stateTag); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Put(ctx, "default", []byte("ok")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Lock(ctx, "default", LockInfo{ID: "old"}); err != nil {
+		t.Fatal(err)
+	}
+	ops := workspaceOperations(c)
+	for _, name := range []string{"read", "write", "verify", "unlock", "delete"} {
+		if err := ops[name](); err != nil {
+			t.Errorf("%s blocked by another workspace's corruption: %v", name, err)
+		}
+	}
+	if _, err := c.List(ctx); err == nil || !strings.Contains(err.Error(), "identity mismatch") {
+		t.Fatalf("list = %v", err)
+	}
+	if _, err := c.Get(ctx, "corrupted"); err == nil || !strings.Contains(err.Error(), "identity mismatch") {
+		t.Fatalf("corrupted workspace accessible: %v", err)
+	}
+}
+
+// countingRepo counts registry calls per method.
+type countingRepo struct {
+	delegatingRepo
+	tags, resolve, fetch atomic.Int64
+}
+
+func (r *countingRepo) Resolve(ctx context.Context, ref string) (ocispec.Descriptor, error) {
+	r.resolve.Add(1)
+	return r.delegatingRepo.Resolve(ctx, ref)
+}
+
+func (r *countingRepo) Fetch(ctx context.Context, d ocispec.Descriptor) (io.ReadCloser, error) {
+	r.fetch.Add(1)
+	return r.delegatingRepo.Fetch(ctx, d)
+}
+
+func (r *countingRepo) Tags(ctx context.Context, last string, fn func([]string) error) error {
+	r.tags.Add(1)
+	return r.delegatingRepo.Tags(ctx, last, fn)
+}
+
+// The preflight must stay bounded regardless of workspace count and retained
+// history: one listing plus Resolve+Fetch of at most three own tags.
+func TestWorkspacePreflightCallsBounded(t *testing.T) {
+	ctx := context.Background()
+	repo := &countingRepo{delegatingRepo: delegatingRepo{inner: newFakeORASRepo()}}
+	c := newTestClient(&orasRepositoryClient{inner: repo})
+	c.config.MaxVersions = 5
+	for i := 0; i < 5; i++ {
+		ws := fmt.Sprintf("ws%d", i)
+		for w := 0; w < 7; w++ {
+			if err := c.Put(ctx, ws, []byte(ws)); err != nil {
+				t.Fatal(err)
+			}
+			c.WaitForRetention()
+		}
+		if _, err := c.Lock(ctx, ws, LockInfo{ID: ws}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	repo.tags.Store(0)
+	repo.resolve.Store(0)
+	repo.fetch.Store(0)
+	if err := newWorkspaceClient(c, "ws0").checkWorkspace(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if tags, resolve, fetch := repo.tags.Load(), repo.resolve.Load(), repo.fetch.Load(); tags != 1 || resolve > 3 || fetch > 3 {
+		t.Fatalf("preflight calls: Tags=%d Resolve=%d Fetch=%d; want 1, <=3, <=3", tags, resolve, fetch)
+	}
+}
+
 func (r *workspaceScanFailure) Tags(context.Context, string, func([]string) error) error {
 	return errors.New("registry listing denied")
 }
+
 func TestWorkspaceScanFailsClosed(t *testing.T) {
 	c := newTestClient(&orasRepositoryClient{inner: &workspaceScanFailure{delegatingRepo{newFakeORASRepo()}}})
 	for name, op := range workspaceOperations(c) {

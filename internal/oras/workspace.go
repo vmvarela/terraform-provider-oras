@@ -28,10 +28,11 @@ func workspaceIDFromTag(tag string) (string, bool) {
 	return "", false
 }
 
-// repositoryWorkspaceIdentities rejects legacy and mixed layouts, even when
-// only locks/history remain. It is not cached: objects can change between RPCs.
-// The repository is the migration boundary, so all reserved tags are checked.
-func repositoryWorkspaceIdentities(ctx context.Context, repo *orasRepositoryClient) (map[string]string, error) {
+// reservedWorkspaceTags lists the repository and rejects legacy and mixed
+// layouts by tag name alone, even when only locks/history remain: every
+// reserved tag must carry a 64-character identifier. It reads no manifests.
+// It is not cached: objects can change between RPCs.
+func reservedWorkspaceTags(ctx context.Context, repo *orasRepositoryClient) ([]string, error) {
 	var tags []string
 	err := retry(ctx, func(ctx context.Context) error {
 		tags = nil
@@ -46,7 +47,7 @@ func repositoryWorkspaceIdentities(ctx context.Context, repo *orasRepositoryClie
 	if err != nil {
 		return nil, fmt.Errorf("checking workspace storage format: %w", err)
 	}
-	identities := make(map[string]string)
+	var reservedTags []string
 	for _, tag := range tags {
 		id, reserved := workspaceIDFromTag(tag)
 		if !reserved {
@@ -58,6 +59,21 @@ func repositoryWorkspaceIdentities(ctx context.Context, repo *orasRepositoryClie
 		if err := (orasRegistry.Reference{Reference: tag}).ValidateReferenceAsTag(); err != nil {
 			return nil, err
 		}
+		reservedTags = append(reservedTags, tag)
+	}
+	return reservedTags, nil
+}
+
+// repositoryWorkspaceIdentities verifies the original-name annotation of
+// every reserved tag in the repository. Used by List, which must never guess
+// a name; per-workspace operations use the scoped checkWorkspace instead.
+func repositoryWorkspaceIdentities(ctx context.Context, repo *orasRepositoryClient) (map[string]string, error) {
+	tags, err := reservedWorkspaceTags(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
+	identities := make(map[string]string)
+	for _, tag := range tags {
 		name, err := workspaceNameFromTag(ctx, repo, tag)
 		if isNotFound(err) {
 			// Concurrent deletion: no object remains to inspect.
@@ -81,20 +97,30 @@ func validateWorkspaceManifest(m ocispec.Manifest, tag, workspace string) error 
 
 // checkWorkspace is a preflight, NOT CAS. It neither fences old binaries nor
 // closes the existing verify-to-write window. Never cache its registry result.
+// Scoped per ADR-0002 Amendment 1: names repo-wide, annotations only for own mutable tags.
 func (wc *workspaceClient) checkWorkspace(ctx context.Context) error {
-	for _, tag := range []string{wc.stateTag, wc.lockTag, wc.unlockedTag, wc.versionTagFor(1 << 30)} {
+	for _, tag := range []string{wc.stateTag, wc.lockTag, wc.unlockedTag, wc.versionTagFor(maxStateVersion)} {
 		if err := (orasRegistry.Reference{Reference: tag}).ValidateReferenceAsTag(); err != nil {
 			return fmt.Errorf("invalid workspace tag: %w", err)
 		}
 	}
-	identities, err := repositoryWorkspaceIdentities(ctx, wc.client.repoClient)
+	tags, err := reservedWorkspaceTags(ctx, wc.client.repoClient)
 	if err != nil {
 		return err
 	}
-	requestedID := workspaceTagFor(wc.stateID)
-	for tag, name := range identities {
-		id, _ := workspaceIDFromTag(tag)
-		if id == requestedID && name != wc.stateID {
+	for _, tag := range tags {
+		if tag != wc.stateTag && tag != wc.lockTag && tag != wc.unlockedTag {
+			continue
+		}
+		name, err := workspaceNameFromTag(ctx, wc.client.repoClient, tag)
+		if isNotFound(err) {
+			// Concurrent deletion: no object remains to inspect.
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if name != wc.stateID {
 			return fmt.Errorf("workspace identity mismatch at tag %q; stop writers and restore verified metadata (see docs/guides/workspace-migration.md)", tag)
 		}
 	}

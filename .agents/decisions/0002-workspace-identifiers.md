@@ -38,8 +38,43 @@ Every workspace (including default) changes tags. Maximum generated tag
 length is bounded independently of name length. All workspaces require the
 original-name annotation for access and listing; missing or contradictory
 metadata is an error rather than a guessed name. Each public operation scans
-repository tags and reads reserved manifests.
-This scales with retained history; optimizing it must preserve legacy detection.
+repository tags. The amendment below bounds the manifest reads.
+
+## Amendment 1: scoped preflight (#48)
+Status: Accepted by the maintainer.
+
+Decision:
+- Every public operation still enumerates all repository tags and rejects any
+  reserved tag whose identifier is not 64 characters (legacy/mixed detection
+  by name, no manifest reads).
+- Only the requested workspace's `state-`, `locked-` and `unlocked-` tags
+  have their original-name annotation read and hashed. This keeps the
+  hash-shaped legacy literal case covered for the workspace being operated on.
+- `stver-*` manifests are verified on use, wherever their numbers or digests
+  are trusted: an existing destination version tag before `Put` overwrites
+  it, the allocation fallback when the state lacks a version annotation, and
+  retention (every version before the keep/delete cutoff; deleting a digest
+  removes every tag pointing at it). A mismatch fails that write or skips
+  pruning. Only canonical version numbers up to 2^30 are recognized, and
+  versions beyond that are refused before writing.
+- Listing keeps the full repository-wide annotation check.
+
+Cost: one listing plus at most three Resolve+Fetch pairs, independent of the
+number of workspaces and retained history (`TestWorkspacePreflightCallsBounded`).
+A versioned `Put` adds one destination check. Background retention reads each
+retained version manifest.
+
+Accepted trade-offs:
+- A repository whose only legacy tags are 64-character literal names of
+  other workspaces is no longer rejected by operations on an unrelated
+  workspace. Listing still rejects it, and so does any operation on the
+  affected workspace's mutable tags.
+- Corrupted history surfaces only when used: reads and locks of the same
+  workspace can still succeed.
+
+In exchange, a corrupted workspace no longer blocks unrelated workspaces
+(`TestWorkspaceForeignIdentityMismatchIsolated`). No caching, CAS or fencing
+is introduced. Checks remain non-atomic with writes.
 
 ## Risks / limitations
 SHA-256 collisions remain theoretically possible; stored identity checks
@@ -51,10 +86,14 @@ subject to the existing registry-specific behavior.
 
 ## Verification
 Regression tests for aliasing, final tag length, lifecycle isolation, legacy
-rejection, identity mismatch, failed scans and Zot integration. Exact test
-results are recorded in the PR.
+rejection, identity mismatch, failed scans and Zot integration. Amendment 1
+adds `TestWorkspacePreflightCallsBounded`,
+`TestWorkspaceForeignIdentityMismatchIsolated` and
+`TestWorkspaceUnverifiedVersionsNotTrusted`. Exact test results are recorded
+in the PR.
 
 ## References
 - #39: isolation and tag bounds
+- #48: scoped preflight (Amendment 1)
 - #30: storage format
 - docs/guides/workspace-migration.md
