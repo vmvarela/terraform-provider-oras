@@ -216,54 +216,6 @@ func TestWorkspaceRejectsMismatchedIdentity(t *testing.T) {
 
 type workspaceScanFailure struct{ delegatingRepo }
 
-// Version manifests are not read by the preflight (ADR-0002 amendment): a
-// mismatched version tag must be caught on use, before retention deletes a
-// digest that also backs another workspace's state.
-func TestWorkspaceVersionIdentityVerifiedOnUse(t *testing.T) {
-	ctx := context.Background()
-	fake := newFakeORASRepo()
-	c := newTestClient(&orasRepositoryClient{inner: fake})
-	c.config.MaxVersions = 1
-	if err := c.Put(ctx, "other", []byte("other state")); err != nil {
-		t.Fatal(err)
-	}
-	for _, data := range []string{"d1", "d2"} {
-		if err := c.Put(ctx, "default", []byte(data)); err != nil {
-			t.Fatal(err)
-		}
-		c.WaitForRetention()
-	}
-	foreign, err := fake.Resolve(ctx, newWorkspaceClient(c, "other").stateTag)
-	if err != nil {
-		t.Fatal(err)
-	}
-	versionTag := newWorkspaceClient(c, "default").versionTagFor(1)
-	if err := fake.Tag(ctx, foreign, versionTag); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := c.Lock(ctx, "default", LockInfo{ID: "me"}); err != nil {
-		t.Fatalf("lock blocked by an unused version tag: %v", err)
-	}
-	if err := c.Put(ctx, "default", []byte("d3")); err != nil {
-		t.Fatal(err)
-	}
-	c.WaitForRetention() // retention must refuse the foreign digest
-	if err := c.Unlock(ctx, "default", "me"); err != nil {
-		t.Fatal(err)
-	}
-
-	if data, err := c.Get(ctx, "other"); err != nil || string(data) != "other state" {
-		t.Fatalf("retention destroyed another workspace's state: %q, %v", data, err)
-	}
-	if got, err := fake.Resolve(ctx, versionTag); err != nil || got.Digest != foreign.Digest {
-		t.Fatal("foreign version object mutated")
-	}
-	if data, err := c.Get(ctx, "default"); err != nil || string(data) != "d3" {
-		t.Fatalf("default state = %q, %v", data, err)
-	}
-}
-
 // Paths that trust version numbers must verify version manifests first:
 // the preflight no longer reads them (ADR-0002 Amendment 1).
 func TestWorkspaceUnverifiedVersionsNotTrusted(t *testing.T) {
@@ -368,6 +320,32 @@ func TestWorkspaceUnverifiedVersionsNotTrusted(t *testing.T) {
 			if _, err := fake.Resolve(ctx, wc.versionTagFor(v)); err != nil {
 				t.Fatalf("legitimate version v%d pruned by a foreign cutoff: %v", v, err)
 			}
+		}
+		wantState(t, c, "other", "other state")
+		wantState(t, c, "default", "d3")
+	})
+
+	t.Run("retention delete set", func(t *testing.T) {
+		// A foreign old version must not make retention delete a digest
+		// that backs another workspace's state; nor block the workspace.
+		fake, c, wc, foreign := setup(t)
+		c.config.MaxVersions = 1
+		for _, data := range []string{"d1", "d2"} {
+			if err := c.Put(ctx, "default", []byte(data)); err != nil {
+				t.Fatal(err)
+			}
+			c.WaitForRetention()
+		}
+		mustTag(t, fake, foreign, wc.versionTagFor(1))
+		if _, err := c.Lock(ctx, "default", LockInfo{ID: "me"}); err != nil {
+			t.Fatalf("lock blocked by an unused version tag: %v", err)
+		}
+		if err := c.Put(ctx, "default", []byte("d3")); err != nil {
+			t.Fatal(err)
+		}
+		c.WaitForRetention()
+		if got, err := fake.Resolve(ctx, wc.versionTagFor(1)); err != nil || got.Digest != foreign.Digest {
+			t.Fatal("foreign version object mutated")
 		}
 		wantState(t, c, "other", "other state")
 		wantState(t, c, "default", "d3")

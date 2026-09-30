@@ -43,11 +43,6 @@ repository tags. The amendment below bounds the manifest reads.
 ## Amendment 1: scoped preflight (#48)
 Status: Accepted by the maintainer.
 
-Measurement (#48): the repository-wide preflight cost `1 + 2 × reserved tags`
-registry calls per operation, 119 of 122 calls for a `Get` with 5 workspaces
-and `max_versions = 10`. A contradictory annotation in any workspace also
-blocked every other workspace.
-
 Decision:
 - Every public operation still enumerates all repository tags and rejects any
   reserved tag whose identifier is not 64 characters (legacy/mixed detection
@@ -93,8 +88,7 @@ subject to the existing registry-specific behavior.
 Regression tests for aliasing, final tag length, lifecycle isolation, legacy
 rejection, identity mismatch, failed scans and Zot integration. Amendment 1
 adds `TestWorkspacePreflightCallsBounded`,
-`TestWorkspaceForeignIdentityMismatchIsolated`,
-`TestWorkspaceVersionIdentityVerifiedOnUse` and
+`TestWorkspaceForeignIdentityMismatchIsolated` and
 `TestWorkspaceUnverifiedVersionsNotTrusted`. Exact test results are recorded
 in the PR.
 

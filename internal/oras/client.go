@@ -957,11 +957,8 @@ func (wc *workspaceClient) currentStateVersion(ctx context.Context) (int, error)
 	return max, nil
 }
 
-// verifiedVersions returns the workspace's version numbers after checking
-// each version manifest's original-name annotation. The preflight does not
-// read version manifests (ADR-0002 Amendment 1), so paths that trust version
-// numbers (allocation fallback, retention cutoff) verify them first. A tag
-// deleted concurrently is skipped; any other failure is returned.
+// verifiedVersions is listExistingVersions minus tags whose manifest belongs
+// to another workspace (ADR-0002 Amendment 1); 404s are skipped.
 func (wc *workspaceClient) verifiedVersions(ctx context.Context) ([]int, error) {
 	versions, err := wc.listExistingVersions(ctx)
 	if err != nil {

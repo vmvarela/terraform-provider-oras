@@ -97,13 +97,7 @@ func validateWorkspaceManifest(m ocispec.Manifest, tag, workspace string) error 
 
 // checkWorkspace is a preflight, NOT CAS. It neither fences old binaries nor
 // closes the existing verify-to-write window. Never cache its registry result.
-//
-// Scope (ADR-0002 amendment): legacy/mixed layouts are rejected by tag name
-// across the whole repository, but only this workspace's mutable tags
-// (state, lock, unlocked marker) have their annotations read, so the cost is
-// bounded regardless of workspace count and retained history. Version
-// manifests are verified on use (versioned Put, allocation fallback and
-// retention; see verifiedVersions).
+// Scoped per ADR-0002 Amendment 1: names repo-wide, annotations only for own mutable tags.
 func (wc *workspaceClient) checkWorkspace(ctx context.Context) error {
 	for _, tag := range []string{wc.stateTag, wc.lockTag, wc.unlockedTag, wc.versionTagFor(maxStateVersion)} {
 		if err := (orasRegistry.Reference{Reference: tag}).ValidateReferenceAsTag(); err != nil {
