@@ -68,10 +68,15 @@ type Config struct {
 	// CAFile is the path to a PEM file with custom CA certificates for TLS.
 	CAFile string
 	// Username is the explicit registry username (priority 2 credential).
+	// Internal/test-only: the provider exposes no HCL credential attributes
+	// and never sets it; users authenticate via environment variables or
+	// configured credentials (see resolveCredentials).
 	Username string
 	// Password is the explicit registry password (priority 2 credential).
+	// Internal/test-only, like Username.
 	Password string
 	// Token is the explicit registry access token (highest credential priority).
+	// Internal/test-only, like Username.
 	Token string
 	// Compression gzip-compresses state layers when true.
 	Compression bool // gzip when true
@@ -225,6 +230,10 @@ func newORASRepositoryClient(registry, repository string, cfg Config) (*orasRepo
 //     Docker/containers config files, Docker credential helpers) resolved by
 //     specificity via resolveConfiguredCredential
 //  6. Anonymous access (EmptyCredential)
+//
+// Steps 1-2 are reachable only by direct Client construction (tests,
+// library use): the provider never populates these Config fields, so
+// provider users start at step 3.
 //
 // Environment Variable Precedence:
 //   - ORAS_TOKEN: Universal token for any OCI registry
