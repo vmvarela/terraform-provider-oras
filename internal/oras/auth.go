@@ -67,16 +67,12 @@ type Config struct {
 	TLSSkipVerify bool
 	// CAFile is the path to a PEM file with custom CA certificates for TLS.
 	CAFile string
+	// Username, Password, Token: tests/library only, see resolveCredentials.
 	// Username is the explicit registry username (priority 2 credential).
-	// Internal/test-only: the provider exposes no HCL credential attributes
-	// and never sets it; users authenticate via environment variables or
-	// configured credentials (see resolveCredentials).
 	Username string
 	// Password is the explicit registry password (priority 2 credential).
-	// Internal/test-only, like Username.
 	Password string
 	// Token is the explicit registry access token (highest credential priority).
-	// Internal/test-only, like Username.
 	Token string
 	// Compression gzip-compresses state layers when true.
 	Compression bool // gzip when true
