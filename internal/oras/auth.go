@@ -67,6 +67,7 @@ type Config struct {
 	TLSSkipVerify bool
 	// CAFile is the path to a PEM file with custom CA certificates for TLS.
 	CAFile string
+	// Username, Password, Token: tests/library only, see resolveCredentials.
 	// Username is the explicit registry username (priority 2 credential).
 	Username string
 	// Password is the explicit registry password (priority 2 credential).
@@ -225,6 +226,10 @@ func newORASRepositoryClient(registry, repository string, cfg Config) (*orasRepo
 //     Docker/containers config files, Docker credential helpers) resolved by
 //     specificity via resolveConfiguredCredential
 //  6. Anonymous access (EmptyCredential)
+//
+// Steps 1-2 are reachable only by direct Client construction (tests,
+// library use): the provider never populates these Config fields, so
+// provider users start at step 3.
 //
 // Environment Variable Precedence:
 //   - ORAS_TOKEN: Universal token for any OCI registry
