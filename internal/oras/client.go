@@ -736,25 +736,94 @@ const mutableTagObservationLimit = 3
 // tag state, so no longer wait is needed.
 const mutableTagObservationDelay = 500 * time.Millisecond
 
+// tagPrePushNotFoundRetryLimit bounds the total Tag attempts made by ONE
+// call of the helper below when the pinned ORAS manifestStore.Tag pre-push
+// Fetch reports the manifest absent.
+const tagPrePushNotFoundRetryLimit = 3
+
+// tagPrePushNotFoundRetryDelay is the fixed, context-cancellable backoff
+// between attempts (worst-case added wait: 200ms before the third attempt).
+const tagPrePushNotFoundRetryDelay = 100 * time.Millisecond
+
+// tagPrePushNotFoundRetry issues a Tag call on repo, retrying ONLY the
+// sentinel errdef.ErrNotFound — which the pinned ORAS manifestStore.Tag
+// produces when its PRE-PUSH Fetch (a plain GET of the manifest digest)
+// reports the manifest absent (registry/remote/repository.go: Tag → Fetch;
+// Fetch maps GET 404 to fmt.Errorf("%s: %w", digest, errdef.ErrNotFound)).
+//
+// Why retry at all: issue #51 observed an intermittent digest-not-found
+// error during the first GHCR lock acquisition (unchanged source, successful
+// rerun). It did NOT prove read-after-write lag or that a later PUT would
+// succeed; delayed availability of a freshly pushed manifest is the
+// hypothesis this retry accommodates. If the hypothesis is right, a manifest
+// pushed moments earlier can 404 on that digest GET even though the tag PUT
+// itself would succeed; failing hard turns that into intermittent
+// publication errors. The helper handles exactly the pinned ORAS pre-PUT
+// GET-404 path and nothing else.
+//
+// Scope of the 3-attempt cap: it bounds ONE helper call. The unlock/retag
+// paths keep their existing outer transient retry, which may invoke this
+// helper again after a mixed (transient + not-found) sequence; a pure
+// ErrNotFound exhaustion is NOT transient, so the outer loop never retries
+// it — no retry loop unbounded by the cap itself exists.
+//
+// KNOWN LIMITATION — accepted, NOT concurrency-safe: OCI tags are
+// unconditional last-writer-wins (no CAS). Between a 404 and the retried
+// PUT, a rival can publish its own intent under the tag, and this retry
+// overwrites it; that stale-intent window is deliberately accepted to
+// unblock eventually-consistent registries. This must never be described as
+// compare-and-swap or as making tag publication concurrency-safe.
+// Everything else stays fail-closed: any other error is returned
+// immediately — including a tag PUT that failed with an HTTP 404
+// ErrorResponse, which is a remote errcode.ErrorResponse, NOT
+// errdef.ErrNotFound — and transient PUT failures keep their existing
+// per-callsite handling (observation in publishMutableTag, the pre-existing
+// outer transient retry in retagToUnlocked; retagToNewManifest surfaces
+// non-sentinel errors as before).
+func tagPrePushNotFoundRetry(ctx context.Context, repo orasRepository, desc ocispec.Descriptor, reference string) error {
+	for attempt := 1; ; attempt++ {
+		err := repo.Tag(ctx, desc, reference)
+		if err == nil || !errors.Is(err, errdef.ErrNotFound) || attempt == tagPrePushNotFoundRetryLimit {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%w: tag %q retry aborted before attempt %d after pre-push not-found: %w",
+				ctx.Err(), reference, attempt+1, err)
+		case <-time.After(tagPrePushNotFoundRetryDelay):
+		}
+	}
+}
+
 // publishMutableTag publishes desc under tag via a plain Tag PUT, with
 // observation instead of blind retry after a transient (response-lost or
 // failed) result.
 //
-// This is NOT CAS and does not claim to be: the initial Tag proceeds
-// normally, and concurrent writers are still last-writer-wins (the W1/W5
-// windows are unchanged). What this prevents is the BLIND reapplication of a
-// publication whose response was lost: a retried tag PUT cannot silently
-// overwrite a rival that published in the gap, and an ambiguous result fails
-// closed instead of being re-applied.
+// This is NOT CAS and does not claim to be: on the normal/ambiguous PUT
+// path (success, or transient failure handled by observation) the existing
+// last-writer-wins and fail-closed handling is unchanged, and what this
+// prevents is the BLIND reapplication of a publication whose response was
+// lost: a retried tag PUT cannot silently overwrite a rival that published
+// in the gap, and an ambiguous result fails closed instead of being
+// re-applied. The one deliberate exception below (pre-push digest GET 404)
+// DOES add a stale-intent window; see tagPrePushNotFoundRetry.
+//
+// The one deliberate exception to "never re-apply" is the pre-push digest
+// GET 404 (tagPrePushNotFoundRetry): it is a pre-publication failure — no
+// tag PUT was issued yet — so retrying it cannot replay an ambiguous PUT.
+// It still adds a stale-intent window (a rival can publish between
+// attempts) and is not CAS; see tagPrePushNotFoundRetry.
 //
 //   - initial Tag succeeds          → done.
+//   - Tag fails with pre-push 404   → bounded retry (stale-intent window
+//     accepted; see tagPrePushNotFoundRetry).
 //   - Tag fails non-transiently     → surface the error (no observation).
 //   - Tag fails transiently         → observeMutableTag (below).
 func (wc *workspaceClient) publishMutableTag(ctx context.Context, desc ocispec.Descriptor, tag string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	tagErr := wc.client.repoClient.inner.Tag(ctx, desc, tag)
+	tagErr := tagPrePushNotFoundRetry(ctx, wc.client.repoClient.inner, desc, tag)
 	if tagErr == nil {
 		return nil
 	}
@@ -1143,7 +1212,7 @@ func (wc *workspaceClient) retagToNewManifest(ctx context.Context, tags []string
 		return err
 	}
 	for _, tag := range tags {
-		if err := wc.client.repoClient.inner.Tag(ctx, newDesc, tag); err != nil {
+		if err := tagPrePushNotFoundRetry(ctx, wc.client.repoClient.inner, newDesc, tag); err != nil {
 			return err
 		}
 	}
@@ -1208,7 +1277,7 @@ func (wc *workspaceClient) retagToUnlocked(ctx context.Context, expectedDigest s
 			return err
 		}
 		if err := retry(ctx, func(ctx context.Context) error {
-			return wc.client.repoClient.inner.Tag(ctx, desc, wc.unlockedTag)
+			return tagPrePushNotFoundRetry(ctx, wc.client.repoClient.inner, desc, wc.unlockedTag)
 		}); err != nil {
 			return err
 		}
@@ -1228,7 +1297,7 @@ func (wc *workspaceClient) retagToUnlocked(ctx context.Context, expectedDigest s
 	}
 
 	if err := retry(ctx, func(ctx context.Context) error {
-		return wc.client.repoClient.inner.Tag(ctx, desc, wc.lockTag)
+		return tagPrePushNotFoundRetry(ctx, wc.client.repoClient.inner, desc, wc.lockTag)
 	}); err != nil {
 		return err
 	}
