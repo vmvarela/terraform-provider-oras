@@ -107,7 +107,7 @@ Each workspace maps to its own tags:
 | `stver-<sha256>-v<N>` | Versioned snapshots (when `max_versions > 0`) |
 | `locked-<sha256>` / `unlocked-<sha256>` | Lock state (`unlocked-` is the GHCR fallback) |
 
-Every workspace name is encoded as its full lowercase SHA-256 digest. The original name is required in the `org.terraform.workspace` annotation on every state and lock manifest. Tags and annotations are verified together. **Existing repositories require explicit migration**; see [workspace mapping and migration](guides/workspace-migration.md).
+Every workspace name is encoded as its full lowercase SHA-256 digest. The original name is required in the `org.terraform.workspace` annotation on every state and lock manifest. Tags and annotations are verified together. **Existing repositories require explicit migration**; see [workspace mapping and migration](guides/workspace-migration.md). The complete format is specified in [OCI storage format](storage-format.md).
 
 | Content | Media type |
 |---------|------------|

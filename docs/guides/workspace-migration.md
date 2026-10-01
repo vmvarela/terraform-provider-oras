@@ -39,16 +39,18 @@ repository. Existing releases use the legacy layout.
 
 The legacy layout preserved tag-compatible names and otherwise used `ws-`
 plus 16 hash characters. Before each public operation the provider enumerates
-all repository tags and checks every reserved state/history/lock/marker tag
-against its original-name annotation. Missing metadata, mismatched identities,
-legacy tags and mixed layouts fail closed. A legacy lock or history-only
-repository is also rejected. Other artifact tags are ignored.
+all repository tags and rejects any reserved tag that is not in the hashed
+layout, so legacy tags and mixed layouts fail closed. That includes a
+repository holding only legacy locks or history. It then checks the
+original-name annotation of the workspace's own state, lock and marker tags;
+version manifests are checked when used, and listing checks every workspace
+(ADR-0002 Amendment 1). Missing metadata and mismatched identities fail
+closed. Other artifact tags are ignored.
 
-There is no automatic fallback, in-place rewrite or dual-write mode. The
-extra repository-wide metadata reads are a deliberate experimental safety
-tradeoff; they scale with retained tags. Registry failures propagate rather
-than being treated as an empty workspace. Concurrently deleted tags are
-skipped. A missing repository (404) is treated as empty.
+There is no automatic fallback, in-place rewrite or dual-write mode. Registry
+failures propagate rather than being treated as an empty workspace.
+Concurrently deleted tags are skipped. A missing repository (404) is treated
+as empty.
 
 All writers must be stopped for migration. Checks cannot fence an old binary,
 manual registry edits, or a writer racing after the check. Do not run old and
