@@ -47,8 +47,10 @@ TF_ORAS_GHCR_TEST=1 TF_ORAS_GHCR_TOKEN=<token> go test -race -v ./internal/oras/
 
 ## Pull requests
 
-- **Conventional commit titles** (`feat:`, `fix:`, `chore:`, `docs:`) — release-drafter
-  autolabels from them.
+- **Conventional commit titles** (`feat:`, `fix:`, `docs:`) — release-drafter
+  autolabels and categorises from the title. Use `!` before the colon for
+  breaking changes (e.g. `feat!:`); a "breaking" warning in the PR body alone
+  is **not** enough to trigger the major bump.
 - CI must be green: build + tests on all three OSes, lint, and the integration jobs.
 - Add or update tests for behavior changes. Unit tests use the in-memory `fakeORASRepo`
   in `helper_test.go`; no testify, no mocks — plain test doubles.

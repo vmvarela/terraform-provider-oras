@@ -1,66 +1,48 @@
 name-template: 'v$RESOLVED_VERSION'
 tag-template: 'v$RESOLVED_VERSION'
 categories:
+  - title: '💥 Breaking Changes'
+    semver-increment: 'major'
+    exclusive: true
+    when:
+      conventional:
+        breaking: true
   - title: '🚀 Features'
-    labels:
-      - 'type:feature'
+    semver-increment: 'minor'
+    when:
+      conventional:
+        type: 'feat'
   - title: '🐛 Bug Fixes'
-    labels:
-      - 'type:bug'
-  - title: '🧰 Maintenance'
-    labels:
-      - 'type:chore'
-      - 'dependencies'
+    semver-increment: 'patch'
+    when:
+      conventional:
+        type: 'fix'
   - title: '📖 Documentation'
-    labels:
-      - 'type:docs'
+    semver-increment: 'patch'
+    when:
+      conventional:
+        type: 'docs'
+  - title: '🧰 Maintenance'
+    semver-increment: 'patch'
 change-template: '- $TITLE @$AUTHOR (#$NUMBER)'
 change-title-escapes: '\<*_&'
-version-resolver:
-  major:
-    labels:
-      - 'breaking'
-  minor:
-    labels:
-      - 'type:feature'
-  patch:
-    labels:
-      - 'type:bug'
-      - 'type:chore'
-      - 'type:docs'
-      - 'dependencies'
-  default: patch
 # Releases are prerelease-only (-alpha suffixes); without this, the resolver
 # ignores prereleases as "latest" and falls back to v0.0.1.
 include-pre-releases: true
+sync-labels: true
 autolabeler:
-  - label: 'type:feature'
+  - labels:
+      - 'enhancement'
     title:
-      - '/^feat(\(.+\))?!?:/'
-    branch:
-      - '/^feature\//'
-      - '/^feat\//'
-  - label: 'type:bug'
+      - '/^feat(\(.+\))?!?:/i'
+  - labels:
+      - 'bug'
     title:
-      - '/^fix(\(.+\))?!?:/'
-    branch:
-      - '/^fix\//'
-      - '/^bugfix\//'
-  - label: 'type:chore'
+      - '/^fix(\(.+\))?!?:/i'
+  - labels:
+      - 'documentation'
     title:
-      - '/^chore(\(.+\))?!?:/'
-      - '/^ci(\(.+\))?!?:/'
-      - '/^build(\(.+\))?!?:/'
-    branch:
-      - '/^chore\//'
-  - label: 'type:docs'
-    title:
-      - '/^docs(\(.+\))?!?:/'
-    branch:
-      - '/^docs\//'
-  - label: 'breaking'
-    title:
-      - '/^[a-z]+(\(.+\))?!:/'
+      - '/^docs(\(.+\))?!?:/i'
 template: |
   ## What's Changed
 
