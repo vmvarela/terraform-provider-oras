@@ -15,4 +15,4 @@
 - [ ] Tests added or updated for behavior changes
 - [ ] `make lint` clean
 - [ ] Docs updated if behavior changed
-- [ ] PR title follows conventional commits (`feat:`, `fix:`, `chore:`, `docs:`)
+- [ ] PR title follows conventional commits (`feat:`, `fix:`, `docs:`); add `!` before the colon for breaking changes (e.g. `feat!:`) — body alone isn't enough
