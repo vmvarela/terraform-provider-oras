@@ -18,7 +18,7 @@ import (
 	ssschema "github.com/hashicorp/terraform-plugin-framework/statestore/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
-	"github.com/vmvarela/ghoten-oras-backend/state"
+	oras "github.com/vmvarela/ghoten-oras-backend/state"
 )
 
 // ProviderData holds provider-level configuration forwarded to state stores
