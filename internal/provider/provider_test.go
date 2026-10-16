@@ -12,6 +12,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	oras "github.com/vmvarela/ghoten-oras-backend/state"
+
 	ocistatestore "github.com/vmvarela/terraform-provider-oras/internal/statestore"
 )
 
