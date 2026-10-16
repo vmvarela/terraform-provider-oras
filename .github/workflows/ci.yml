@@ -86,45 +86,8 @@ jobs:
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
-  integration-test:
-    name: Integration Test (Zot)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Run Zot integration tests
-        env:
-          TF_ORAS_ZOT_TEST: "1"
-        run: go test -race -v -timeout 120s ./internal/oras/... -run Zot
-
-  ghcr-integration:
-    name: Integration Test (GHCR)
-    # Skip fork PRs: their GITHUB_TOKEN is read-only and cannot push packages.
-    if: github.event_name == 'push' || (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Run GHCR integration tests
-        env:
-          TF_ORAS_GHCR_TEST: "1"
-          TF_ORAS_GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: go test -race -v -timeout 300s ./internal/oras/... -run 'TestGHCRIntegration'
+  # Registry-engine integration coverage lives in the shared ORAS state
+  # library. This repository tests only the Terraform StateStore adapter.
 
   terraform-integration:
     name: Terraform Integration (State Store)
