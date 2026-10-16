@@ -13,7 +13,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	fwss "github.com/hashicorp/terraform-plugin-framework/statestore"
 
-	"github.com/vmvarela/ghoten-oras-backend/state"
+	oras "github.com/vmvarela/ghoten-oras-backend/state"
 )
 
 func TestPublicationRecoveryDiagnostics(t *testing.T) {
