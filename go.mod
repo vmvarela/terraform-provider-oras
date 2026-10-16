@@ -8,6 +8,7 @@ require (
 	github.com/hashicorp/terraform-plugin-go v0.31.0
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.1
+	github.com/vmvarela/ghoten-oras-backend v0.1.2-0.20261016220125-dd50d11b5863
 	golang.org/x/sync v0.24.0
 	oras.land/oras-go/v2 v2.6.2
 )
