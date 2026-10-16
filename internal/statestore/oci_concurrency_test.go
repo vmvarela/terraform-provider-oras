@@ -50,7 +50,7 @@ import (
 	fwss "github.com/hashicorp/terraform-plugin-framework/statestore"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 
-	"github.com/vmvarela/terraform-provider-oras/internal/oras"
+	oras "github.com/vmvarela/ghoten-oras-backend/state"
 )
 
 // testWaitTimeout is the generous bound for joining concurrent actors; it

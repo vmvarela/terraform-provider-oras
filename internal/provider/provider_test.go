@@ -11,8 +11,8 @@ import (
 	fwss "github.com/hashicorp/terraform-plugin-framework/statestore"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
+	oras "github.com/vmvarela/ghoten-oras-backend/state"
 
-	"github.com/vmvarela/terraform-provider-oras/internal/oras"
 	ocistatestore "github.com/vmvarela/terraform-provider-oras/internal/statestore"
 )
 

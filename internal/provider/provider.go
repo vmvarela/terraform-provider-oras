@@ -17,8 +17,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/statestore"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	oras "github.com/vmvarela/ghoten-oras-backend/state"
 
-	"github.com/vmvarela/terraform-provider-oras/internal/oras"
 	ocistatestore "github.com/vmvarela/terraform-provider-oras/internal/statestore"
 )
 
