@@ -1,4 +1,5 @@
-// Package credentials resolves OCI credentials for the Terraform provider.\npackage credentials
+// Package credentials resolves OCI credentials for the Terraform provider.
+package credentials
 
 import (
 	"context"
