@@ -17,7 +17,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/statestore"
 	"github.com/hashicorp/terraform-plugin-framework/types"
-	oras "github.com/vmvarela/ghoten-oras-backend/state"
+	orasorasstate "github.com/vmvarela/oras-state"
 
 	ocistatestore "github.com/vmvarela/terraform-provider-oras/internal/statestore"
 )
@@ -50,7 +50,7 @@ type providerModel struct {
 // Metadata sets the provider type name used to prefix resource/state-store names.
 func (p *OrasProvider) Metadata(_ context.Context, _ provider.MetadataRequest, resp *provider.MetadataResponse) {
 	resp.TypeName = "oras"
-	resp.Version = oras.Version
+	resp.Version = orasstate.Version
 }
 
 // Schema declares provider-level configuration attributes.
@@ -142,7 +142,7 @@ func (p *OrasProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 		caFile = cfg.CAFile.ValueString()
 	}
 
-	httpClient, err := oras.BuildHTTPClient(skipVerify, caFile)
+	httpClient, err := orasstate.BuildHTTPClient(skipVerify, caFile)
 	if err != nil {
 		resp.Diagnostics.AddError("Failed to create HTTP client", err.Error())
 		return
