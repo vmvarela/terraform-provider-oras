@@ -66,6 +66,11 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Resolve module sums
+        run: |
+          go mod tidy
+          git diff -- go.mod go.sum
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
