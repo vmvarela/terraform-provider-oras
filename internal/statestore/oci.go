@@ -18,7 +18,7 @@ import (
 	ssschema "github.com/hashicorp/terraform-plugin-framework/statestore/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
-	oras "github.com/vmvarela/ghoten-oras-backend/state"
+	oras "github.com/vmvarela/oras-state"
 
 	"github.com/vmvarela/terraform-provider-oras/internal/credentials"
 )
