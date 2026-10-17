@@ -11,7 +11,8 @@ import (
 	"testing"
 	"time"
 
-	state "github.com/vmvarela/ghoten-oras-backend/state"\n\torasAuth "oras.land/oras-go/v2/registry/remote/auth"
+	state "github.com/vmvarela/ghoten-oras-backend/state"
+	orasAuth "oras.land/oras-go/v2/registry/remote/auth"
 )
 
 // clearCredEnv clears all environment variables that influence credential
