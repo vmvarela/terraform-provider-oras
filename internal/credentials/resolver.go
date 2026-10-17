@@ -4,7 +4,7 @@ import (
 	"context"
 	"os"
 
-	orasstate "github.com/vmvarela/oras-state"
+	orasorasstate "github.com/vmvarela/oras-state"
 	orasAuth "orasstate.land/oras-go/v2/registry/remote/auth"
 )
 
@@ -16,7 +16,7 @@ import (
 //  2. GHCR_TOKEN / GITHUB_TOKEN for ghcr.io
 //  3. Terraform CLI config and Docker/containers credential sources
 //  4. anonymous
-func NewResolver(registry, repository string) orasorasstate.CredentialFunc {
+func NewResolver(registry, repository string) orasstate.CredentialFunc {
 	registry = normalizeRegistryHost(registry)
 
 	return func(ctx context.Context, _ string) (orasstate.Credential, error) {
