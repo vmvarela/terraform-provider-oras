@@ -27,7 +27,7 @@
 // is ever closed. The former retry-blind tests (Tests 11/14) and the former
 // TTL-expiry-during-write test (Test 12) were converted into positive
 // regression guards: Tests 11/14 assert fail-closed retry behavior
-// (internal/oras publishMutableTag) and Test 12 asserts stored-lease refusal
+// (oras-state publishMutableTag) and Test 12 asserts stored-lease refusal
 // at VerifyLock (Fase D). Scope of the observed publication guarantees:
 // FOREGROUND state/version publication only (including the partial "state
 // lands, version tag fails closed" case of Test 15); asynchronous retention
