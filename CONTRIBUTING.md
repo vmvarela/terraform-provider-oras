@@ -33,17 +33,21 @@ it may hold your `oci_credentials` blocks.
 
 ## Integration tests
 
-Zot integration tests spin up a Zot registry container per test via Docker:
+Registry-engine integration coverage belongs to [`vmvarela/oras-state`](https://github.com/vmvarela/oras-state).
+Do not duplicate Zot/GHCR engine tests in this provider.
+
+This repository owns the Terraform StateStore adapter integration. CI starts a disposable Zot
+registry and runs the pinned Terraform alpha recovery harness:
 
 ```bash
-TF_ORAS_ZOT_TEST=1 make test-zot
+go build -o terraform-provider-oras .
+python3 scripts/terraform_recovery_e2e.py \
+  --provider-dir "$PWD" \
+  --registry localhost:5001
 ```
 
-GHCR integration tests run against a real registry and need a token:
-
-```bash
-TF_ORAS_GHCR_TEST=1 TF_ORAS_GHCR_TOKEN=<token> go test -race -v ./internal/oras/... -run TestGHCRIntegration
-```
+The command above expects a disposable Zot instance on `localhost:5001` and the pinned Terraform
+alpha on `PATH`. CI is the canonical end-to-end environment.
 
 ## Pull requests
 
@@ -54,8 +58,7 @@ TF_ORAS_GHCR_TEST=1 TF_ORAS_GHCR_TOKEN=<token> go test -race -v ./internal/oras/
 - CI must be green: build + tests on all three OSes, lint, and the integration jobs.
 - Add or update tests for behavior changes. Unit tests use the in-memory `fakeORASRepo`
   in `helper_test.go`; no testify, no mocks — plain test doubles.
-- If you touched async retention or locking, call `Client.WaitForRetention()` before
-  assertions.
+- Changes to registry semantics, retention, locking, or tag publication belong in `oras-state`; update that dependency and keep this repository focused on adapter behavior.
 
 Keep changes minimal. The storage layout (`state-<workspace>`, `stver-<workspace>-v<N>`,
 lock tags) is load-bearing — changes there are breaking and need discussion first.
