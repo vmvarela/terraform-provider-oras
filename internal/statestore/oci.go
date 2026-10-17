@@ -1,6 +1,6 @@
 // Package statestore implements the OCI state store for the Terraform plugin framework.
 // It bridges the terraform-plugin-framework statestore.StateStore interface with the
-// ORAS client in internal/oras, enabling Terraform to persist tfstate in OCI registries.
+// shared oras-state client, enabling Terraform to persist tfstate in OCI registries.
 package statestore
 
 import (
@@ -18,7 +18,7 @@ import (
 	ssschema "github.com/hashicorp/terraform-plugin-framework/statestore/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
-	oras "github.com/vmvarela/oras-state"
+	orasorasstate "github.com/vmvarela/oras-state"
 
 	"github.com/vmvarela/terraform-provider-oras/internal/credentials"
 )
@@ -42,12 +42,12 @@ var (
 // Terraform creates a fresh OCIStateStore per RPC, so mutable state (the lock
 // registry) must NOT live on the struct: it travels via StateStoreData.
 type OCIStateStore struct {
-	// shared carries the *oras.Client and the lock registry created in
+	// shared carries the *orasstate.Client and the lock registry created in
 	// Initialize and restored in Configure on every new instance.
 	shared *stateStoreData
 
 	// client is shorthand for shared.client, set by Configure.
-	client *oras.Client
+	client *orasstate.Client
 }
 
 // stateStoreData is the payload Initialize places in
@@ -55,7 +55,7 @@ type OCIStateStore struct {
 // restores in Configure. It owns the lock registry so all instances of the
 // same store configuration share ownership tracking.
 type stateStoreData struct {
-	client *oras.Client
+	client *orasstate.Client
 
 	mu      sync.Mutex
 	lockIDs map[string]string // StateID → lock ID acquired by this configuration
@@ -223,7 +223,7 @@ func (s *OCIStateStore) ValidateConfig(ctx context.Context, req fwss.ValidateCon
 //
 //	provider.ConfigureResponse.StateStoreData (*provider.ProviderData)
 //	  → Initialize receives it as req.ProviderData
-//	  → Initialize sets resp.StateStoreData = *oras.Client
+//	  → Initialize sets resp.StateStoreData = *orasstate.Client
 //	  → Configure receives it as req.StateStoreData
 func (s *OCIStateStore) Initialize(ctx context.Context, req fwss.InitializeRequest, resp *fwss.InitializeResponse) {
 	var cfg storeModel
@@ -248,7 +248,7 @@ func (s *OCIStateStore) Initialize(ctx context.Context, req fwss.InitializeReque
 		return
 	}
 
-	var orasCfg oras.Config
+	var orasCfg orasstate.Config
 	orasCfg.CredentialFunc = credentials.NewResolver(registry, repository)
 
 	// Forward provider-level transport and TLS settings to the ORAS client.
@@ -279,7 +279,7 @@ func (s *OCIStateStore) Initialize(ctx context.Context, req fwss.InitializeReque
 		orasCfg.MaxStateSize = cfg.MaxStateSize.ValueInt64()
 	}
 
-	client, err := oras.NewClient(registry, repository, orasCfg)
+	client, err := orasstate.NewClient(registry, repository, orasCfg)
 	if err != nil {
 		resp.Diagnostics.AddError("Failed to create OCI client", err.Error())
 		return
@@ -305,7 +305,7 @@ func (s *OCIStateStore) Configure(_ context.Context, req fwss.ConfigureRequest, 
 	case *stateStoreData:
 		s.shared = data
 		s.client = data.client
-	case *oras.Client:
+	case *orasstate.Client:
 		// Direct client (legacy path): wrap it in a per-instance registry.
 		s.shared = &stateStoreData{client: data}
 		s.client = data
@@ -334,7 +334,7 @@ func (s *OCIStateStore) Read(ctx context.Context, req fwss.ReadRequest, resp *fw
 //
 // fwss.WriteRequest carries no LockID, so ownership is checked against locks
 // this instance acquired: if we hold a registered lock for the StateID, the
-// remote lock must still be ours (oras.Client.VerifyLock) before writing —
+// remote lock must still be ours (orasstate.Client.VerifyLock) before writing —
 // a lost lock means another client won, and we refuse to overwrite their
 // state. If we hold NO local lock (e.g. Terraform's explicit -lock=false
 // usage, where Lock is never called), the write proceeds unverified: this is
@@ -373,7 +373,7 @@ const stateRecoveryGuidance = "Do not blindly re-apply. Stop other writers, secu
 // A partial error confirms state publication even when its version step was
 // cancelled. Other interrupted writes remain uncertain, not wholly rejected.
 func addPublicationDiagnostic(diags *diag.Diagnostics, stateID string, err error) {
-	var partial *oras.PartialPublicationError
+	var partial *orasstate.PartialPublicationError
 	if errors.As(err, &partial) {
 		diags.AddError(
 			"State version publication failed",
@@ -390,7 +390,7 @@ func addPublicationDiagnostic(diags *diag.Diagnostics, stateID string, err error
 		)
 		return
 	}
-	if errors.Is(err, oras.ErrMutableTagMoved) {
+	if errors.Is(err, orasstate.ErrMutableTagMoved) {
 		// A transient write failure left the state tag's ownership
 		// ambiguous: the publication failed closed instead of blindly
 		// re-applying over a possibly newer state. Note this does NOT
@@ -446,7 +446,7 @@ func (s *OCIStateStore) Lock(ctx context.Context, req fwss.LockRequest, resp *fw
 	newLockInfoMu.Unlock()
 
 	// Map framework LockInfo → oras LockInfo.
-	orasLockInfo := oras.LockInfo{
+	orasLockInfo := orasstate.LockInfo{
 		ID:        fwLockInfo.ID,
 		Operation: fwLockInfo.Operation,
 		Who:       fwLockInfo.Who,
@@ -455,9 +455,9 @@ func (s *OCIStateStore) Lock(ctx context.Context, req fwss.LockRequest, resp *fw
 
 	lockID, err := s.client.Lock(ctx, req.StateID, orasLockInfo)
 	if err != nil {
-		var lockErr *oras.LockError
+		var lockErr *orasstate.LockError
 		if errors.As(err, &lockErr) && lockErr.Info != nil {
-			// Map the existing holder's oras.LockInfo → fwss.LockInfo for the diagnostic.
+			// Map the existing holder's orasstate.LockInfo → fwss.LockInfo for the diagnostic.
 			existingLock := fwss.LockInfo{
 				ID:        lockErr.Info.ID,
 				Operation: lockErr.Info.Operation,
@@ -477,7 +477,7 @@ func (s *OCIStateStore) Lock(ctx context.Context, req fwss.LockRequest, resp *fw
 
 // Unlock releases a lock previously acquired by Lock.
 func (s *OCIStateStore) Unlock(ctx context.Context, req fwss.UnlockRequest, resp *fwss.UnlockResponse) {
-	// An empty LockID must never unlock: oras.Client.Unlock treats an empty
+	// An empty LockID must never unlock: orasstate.Client.Unlock treats an empty
 	// ID as "any holder", so this would release someone else's lock.
 	if req.LockID == "" {
 		resp.Diagnostics.AddError(
