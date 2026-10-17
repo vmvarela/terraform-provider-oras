@@ -12,7 +12,7 @@ import (
 	"time"
 
 	orasstate "github.com/vmvarela/oras-state"
-	orasAuth "orasstate.land/oras-go/v2/registry/remote/auth"
+	orasAuth "oras.land/oras-go/v2/registry/remote/auth"
 )
 
 // clearCredEnv clears all environment variables that influence credential
