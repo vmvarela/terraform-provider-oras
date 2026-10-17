@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	orasAuth "oras.land/oras-go/v2/registry/remote/auth"
+	state "github.com/vmvarela/ghoten-oras-backend/state"\n\torasAuth "oras.land/oras-go/v2/registry/remote/auth"
 )
 
 // clearCredEnv clears all environment variables that influence credential
@@ -501,21 +501,21 @@ func TestLoadCLIConfig(t *testing.T) {
 	})
 }
 
-func TestResolveCredentialsPrecedence(t *testing.T) {
+func TestResolverPrecedence(t *testing.T) {
 	clearCredEnv(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-based credential helper test requires a POSIX shell")
 	}
 
-	credOf := func(fn orasAuth.CredentialFunc) orasAuth.Credential {
-		cred, err := fn(context.Background(), "ghcr.io")
+	resolve := func(t *testing.T, registry, repository string) state.Credential {
+		t.Helper()
+		cred, err := NewResolver(registry, repository)(context.Background(), registry)
 		if err != nil {
-			t.Fatalf("credential func error: %v", err)
+			t.Fatalf("credential resolver error: %v", err)
 		}
 		return cred
 	}
 
-	// Set up CLI config + docker config used by later subtests.
 	dir := t.TempDir()
 	tfrc := writeTestFile(t, dir, ".terraformrc", `
 		oci_credentials "ghcr.io" {
@@ -529,139 +529,49 @@ func TestResolveCredentialsPrecedence(t *testing.T) {
 		"auths": {"ghcr.io": {"auth": "`+base64.StdEncoding.EncodeToString([]byte("docker-user:docker-pass"))+`"}}
 	}`)
 
-	t.Run("token beats everything", func(t *testing.T) {
+	t.Run("ORAS_TOKEN beats configured credentials", func(t *testing.T) {
+		clearCredEnv(t)
 		t.Setenv("ORAS_TOKEN", "env-token")
 		t.Setenv("TF_CLI_CONFIG_FILE", tfrc)
-		fn, token, _ := resolveCredentials("ghcr.io", "org/app", Config{Token: "explicit"})
-		if token != "explicit" || credOf(fn).Password != "explicit" {
-			t.Errorf("token priority broken: token=%q cred=%+v", token, credOf(fn))
-		}
-	})
-
-	t.Run("env beats CLI config", func(t *testing.T) {
-		t.Setenv("ORAS_TOKEN", "env-token")
-		t.Setenv("TF_CLI_CONFIG_FILE", tfrc)
-		fn, token, _ := resolveCredentials("ghcr.io", "org/app", Config{})
-		if token != "env-token" || credOf(fn).Password != "env-token" {
-			t.Errorf("env priority broken: token=%q cred=%+v", token, credOf(fn))
+		cred := resolve(t, "ghcr.io", "org/app")
+		if cred.Password != "env-token" {
+			t.Fatalf("got %+v, want ORAS_TOKEN via GHCR basic exchange", cred)
 		}
 	})
 
 	t.Run("CLI config beats docker config", func(t *testing.T) {
+		clearCredEnv(t)
 		t.Setenv("TF_CLI_CONFIG_FILE", tfrc)
-		fn, token, _ := resolveCredentials("ghcr.io", "org/app", Config{})
-		if token != "" {
-			t.Errorf("configured credential should not set resolved token, got %q", token)
-		}
-		cred := credOf(fn)
+		cred := resolve(t, "ghcr.io", "org/app")
 		if cred.Username != "cli-user" || cred.Password != "cli-pass" {
-			t.Errorf("got %+v, want CLI config credential", cred)
+			t.Fatalf("got %+v, want CLI config credential", cred)
 		}
 	})
 
-	t.Run("docker config used when no CLI config", func(t *testing.T) {
-		fn, token, _ := resolveCredentials("ghcr.io", "org/app", Config{})
-		if token != "" {
-			t.Errorf("docker config should not set resolved token, got %q", token)
-		}
-		cred := credOf(fn)
+	t.Run("docker config used without CLI config", func(t *testing.T) {
+		clearCredEnv(t)
+		cred := resolve(t, "ghcr.io", "org/app")
 		if cred.Username != "docker-user" || cred.Password != "docker-pass" {
-			t.Errorf("got %+v, want docker config credential", cred)
+			t.Fatalf("got %+v, want docker credential", cred)
 		}
 	})
 
 	t.Run("anonymous when nothing configured", func(t *testing.T) {
-		t.Setenv("TF_CLI_CONFIG_FILE", "")
-		t.Setenv("TERRAFORM_CONFIG", "")
-		setTestHome(t, t.TempDir()) // no docker config, no terraformrc
-		fn, token, cred := resolveCredentials("registry.example.com", "some/repo", Config{})
-		if token != "" {
-			t.Errorf("token = %q, want empty", token)
-		}
-		got, err := fn(context.Background(), "registry.example.com")
-		if err != nil {
-			t.Fatalf("credential func error: %v", err)
-		}
-		if got != orasAuth.EmptyCredential || cred != orasAuth.EmptyCredential {
-			t.Errorf("cred = %+v resolved = %+v, want EmptyCredential", cred, got)
+		clearCredEnv(t)
+		setTestHome(t, t.TempDir())
+		cred := resolve(t, "registry.example.com", "some/repo")
+		if cred != (state.Credential{}) {
+			t.Fatalf("got %+v, want anonymous credential", cred)
 		}
 	})
 
-	t.Run("uppercase GHCR.IO uses GHCR_TOKEN", func(t *testing.T) {
+	t.Run("uppercase GHCR uses GHCR_TOKEN", func(t *testing.T) {
 		clearCredEnv(t)
-		setTestHome(t, t.TempDir()) // no docker config, no terraformrc
-		t.Setenv("TF_CLI_CONFIG_FILE", "")
+		setTestHome(t, t.TempDir())
 		t.Setenv("GHCR_TOKEN", "ghtok")
-		fn, token, _ := resolveCredentials("GHCR.IO", "org/app", Config{})
-		if token != "ghtok" {
-			t.Errorf("token = %q, want %q", token, "ghtok")
-		}
-		// GHCR tokens must be exchanged via basic auth, not sent as Bearer.
-		// The credential func is keyed by the normalized host — the host the
-		// HTTP client actually dials.
-		got, err := fn(context.Background(), "ghcr.io")
-		if err != nil {
-			t.Fatalf("credential func error: %v", err)
-		}
-		if got.Username == "" || got.Password != "ghtok" {
-			t.Errorf("cred = %+v, want basic auth with password ghtok", got)
-		}
-	})
-}
-
-func TestAccessTokenFallbackFromResolvedCredential(t *testing.T) {
-	t.Run("explicit token wins", func(t *testing.T) {
-		r := &orasRepositoryClient{
-			token:        "explicit",
-			resolvedCred: orasAuth.Credential{AccessToken: "from-cred"},
-		}
-		token, err := r.accessToken(context.Background())
-		if err != nil || token != "explicit" {
-			t.Errorf("got %q err=%v, want explicit", token, err)
-		}
-	})
-
-	t.Run("resolved AccessToken", func(t *testing.T) {
-		r := &orasRepositoryClient{
-			resolvedCred: orasAuth.Credential{AccessToken: "at", Password: "pw"},
-		}
-		token, err := r.accessToken(context.Background())
-		if err != nil || token != "at" {
-			t.Errorf("got %q err=%v, want at", token, err)
-		}
-	})
-
-	t.Run("resolved Password as fallback", func(t *testing.T) {
-		r := &orasRepositoryClient{
-			resolvedCred: orasAuth.Credential{Username: "u", Password: "pw"},
-		}
-		token, err := r.accessToken(context.Background())
-		if err != nil || token != "pw" {
-			t.Errorf("got %q err=%v, want pw", token, err)
-		}
-	})
-
-	t.Run("no credential yields empty string", func(t *testing.T) {
-		r := &orasRepositoryClient{resolvedCred: orasAuth.EmptyCredential}
-		token, err := r.accessToken(context.Background())
-		if err != nil || token != "" {
-			t.Errorf("got %q err=%v, want empty", token, err)
-		}
-	})
-
-	t.Run("resolveCredentials returns configured credential", func(t *testing.T) {
-		clearCredEnv(t)
-		dir := t.TempDir()
-		setTestHome(t, dir) // os.UserHomeDir() resolves HOME or USERPROFILE
-		writeTestFile(t, dir, ".docker/config.json", `{
-			"auths": {"ghcr.io": {"auth": "`+base64.StdEncoding.EncodeToString([]byte("docker-user:docker-token"))+`"}}
-		}`)
-		_, token, cred := resolveCredentials("ghcr.io", "org/app", Config{})
-		if token != "" {
-			t.Errorf("token = %q, want empty", token)
-		}
-		if cred.Username != "docker-user" || cred.Password != "docker-token" {
-			t.Errorf("resolved cred = %+v, want docker config credential", cred)
+		cred := resolve(t, "GHCR.IO", "org/app")
+		if cred.Username == "" || cred.Password != "ghtok" {
+			t.Fatalf("got %+v, want GHCR basic exchange credential", cred)
 		}
 	})
 }
