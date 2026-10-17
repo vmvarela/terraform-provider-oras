@@ -4,7 +4,7 @@ import (
 	"context"
 	"os"
 
-	state "github.com/vmvarela/ghoten-oras-backend/state"
+	state "github.com/vmvarela/oras-state"
 	orasAuth "oras.land/oras-go/v2/registry/remote/auth"
 )
 
