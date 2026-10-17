@@ -1,6 +1,6 @@
 BINARY     = terraform-provider-oras
 # Last tagged release (v-prefix stripped), falling back to 0.0.0-dev when the
-# checkout has no tags (shallow clone, tarball). Override with `make install VERSION=0.1.5`
+# checkout has no tags (shallow clone, tarball). Override with `make install VERSION=0.1.8`
 # if you need a specific mirror directory.
 GIT_TAG    ?= $(shell git describe --tags --abbrev=0 2>/dev/null)
 VERSION    ?= $(if $(GIT_TAG),$(patsubst v%,%,$(GIT_TAG)),0.0.0-dev)
@@ -10,7 +10,7 @@ PLUGIN_DIR = $(HOME)/.terraform.d/plugins/registry.terraform.io/vmvarela/oras/$(
 # Minimum total coverage percentage enforced by the coverage target.
 COVERAGE_THRESHOLD ?= 80
 
-.PHONY: build install dev-override test test-zot coverage lint clean
+.PHONY: build install dev-override test coverage lint clean
 
 build:
 	go build -o $(BINARY) .
@@ -43,8 +43,6 @@ coverage:
 		exit 1; \
 	fi
 
-test-zot:
-	TF_ORAS_ZOT_TEST=1 go test -race -v -timeout 120s ./internal/oras/... -run Zot
 
 lint:
 	golangci-lint run ./...

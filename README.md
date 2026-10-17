@@ -19,7 +19,7 @@ terraform {
     # Pin the exact stable version. Pre-release versions (e.g. 0.1.6-alpha)
     # additionally require an exact pin: Terraform's range operators (~>, >=, …)
     # never select pre-releases.
-    oras = { source = "registry.terraform.io/vmvarela/oras", version = "0.1.5" }
+    oras = { source = "registry.terraform.io/vmvarela/oras", version = "0.1.8" }
   }
 
   state_store "oras_oci" {
@@ -41,7 +41,8 @@ terraform init && terraform apply
 ```
 
 Full configuration reference, storage layout, and locking semantics: [`docs/index.md`](docs/index.md).
-Architecture, consistency guarantees, and failure behavior: [`docs/architecture.md`](docs/architecture.md).
+Provider/engine boundary and consistency model: [`docs/architecture.md`](docs/architecture.md).
+The registry-facing state engine is [`vmvarela/oras-state`](https://github.com/vmvarela/oras-state), pinned as a normal Go module dependency.
 Credential resolution: [`docs/guides/authentication.md`](docs/guides/authentication.md).
 Failed state writes and non-renewing leases: [`docs/guides/state-recovery.md`](docs/guides/state-recovery.md).
 An apply can change infrastructure before an expired lease prevents saving state;
@@ -66,9 +67,7 @@ either new option. See [transport upgrade instructions](docs/guides/authenticati
 ## Development
 
 ```bash
-make test                           # unit tests, no external deps
-TF_ORAS_ZOT_TEST=1 make test-zot    # integration: spins Zot via Docker
-# Without Docker: also set TF_ORAS_ZOT_BINARY=/absolute/path/to/zot (v2.1.0)
+make test                           # provider unit tests, no external deps
 make coverage                       # tests + coverage gate (default 80%, COVERAGE_THRESHOLD=N to change)
 make lint
 make install                        # build + install to ~/.terraform.d/... (VERSION= overrides the mirror dir)

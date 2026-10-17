@@ -32,12 +32,6 @@ linters:
       - linters:
           - gosec
         text: "G204"
-      # gosec G118: retention goroutine outlives the request on purpose
-      # (async version pruning — see AGENTS.md); request context would cancel it.
-      - path: internal/oras/client\.go
-        linters:
-          - gosec
-        text: "G118"
 
 formatters:
   enable:

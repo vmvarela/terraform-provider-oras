@@ -9,7 +9,7 @@ description: |-
 
 ~> **Experimental:** Requires a Terraform 1.17+ alpha build with the pluggable state storage experiment enabled. It will not work with any stable Terraform release, and the statestore plugin API may break across alpha releases.
 
-Implements Terraform's `statestore.StateStore` interface to keep state in an OCI-compatible registry as OCI artifact manifests. Tested against ghcr.io and Zot; other registries are untested, and behavior is registry-specific.
+Implements Terraform's `statestore.StateStore` interface and adapts Terraform-specific configuration, credentials, locking diagnostics, and RPC lifecycle to the shared [`oras-state`](https://github.com/vmvarela/oras-state) OCI state engine. The engine is tested against ghcr.io and Zot; other registries are untested, and behavior is registry-specific.
 
 No resources, no data sources. The provider exists solely to expose the `oras_oci` state store.
 
@@ -29,7 +29,7 @@ terraform {
       # Pin the exact stable version. Pre-release versions (e.g. 0.1.6-alpha)
       # additionally require an exact pin: Terraform's range operators (~>, >=, …)
       # never select pre-releases.
-      version = "0.1.5"
+      version = "0.1.8"
     }
   }
 

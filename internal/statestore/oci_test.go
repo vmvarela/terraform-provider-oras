@@ -651,7 +651,7 @@ func rivalLockManifest(t *testing.T, holderID string) []byte {
 
 // ─── Lock / Unlock / Write lifecycle ──────────────────────────────────────────
 
-// testLockTag is lockTagPrefix + workspaceTagFor("default") from internal/orasstate.
+// testLockTag is lockTagPrefix + workspaceTagFor("default") from oras-state.
 const testWorkspaceTag = "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f"
 const testLockTag = "locked-" + testWorkspaceTag
 const testStateTag = "state-" + testWorkspaceTag
