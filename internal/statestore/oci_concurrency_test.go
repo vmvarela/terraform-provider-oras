@@ -50,7 +50,7 @@ import (
 	fwss "github.com/hashicorp/terraform-plugin-framework/statestore"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 
-	oras "github.com/vmvarela/ghoten-oras-backend/state"
+	orasorasstate "github.com/vmvarela/oras-state"
 )
 
 // testWaitTimeout is the generous bound for joining concurrent actors; it
@@ -181,7 +181,7 @@ func waitSignal(t *testing.T, ch <-chan struct{}, what string) {
 
 // TestStateStoreConcurrentLockSingleWinner — Property (issue #28 I1): when N
 // clients attempt Lock simultaneously on an empty lock tag, exactly one may
-// acquire it; every loser receives *oras.LockError, and the winner ends up in
+// acquire it; every loser receives *orasstate.LockError, and the winner ends up in
 // the shared local lock registry (registration is mirrored here exactly as
 // OCIStateStore.Lock does after a successful acquire).
 //
@@ -214,7 +214,7 @@ func TestStateStoreConcurrentLockSingleWinner(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start // barrier: all contenders released at once
-			info := oras.LockInfo{
+			info := orasstate.LockInfo{
 				ID:        fmt.Sprintf("contender-%d", i),
 				Operation: "apply",
 				Who:       "contender",
@@ -233,9 +233,9 @@ func TestStateStoreConcurrentLockSingleWinner(t *testing.T) {
 			winnerID = ids[i]
 			continue
 		}
-		var lockErr *oras.LockError
+		var lockErr *orasstate.LockError
 		if !errors.As(err, &lockErr) {
-			t.Errorf("actor %d failed with %T, want *oras.LockError", i, err)
+			t.Errorf("actor %d failed with %T, want *orasstate.LockError", i, err)
 		}
 		if ids[i] != "" {
 			t.Errorf("actor %d failed but returned LockID %q", i, ids[i])
@@ -264,7 +264,7 @@ func TestStateStoreConcurrentLockSingleWinner(t *testing.T) {
 
 // TestStateStoreConcurrentLockRivalHolder — Property (issue #28 I2): when a
 // rival already holds the lock, ALL contenders fail; every loser's
-// *oras.LockError names the holder; no contender registers a local lock; the
+// *orasstate.LockError names the holder; no contender registers a local lock; the
 // rival's lock tag survives. The fwss diagnostic mapping (holder name in the
 // detail) is asserted sequentially at the end. Qualified I1: fake-serialized,
 // no induced transients — contention is deterministic (the rival manifest is
@@ -287,7 +287,7 @@ func TestStateStoreConcurrentLockRivalHolder(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			info := oras.LockInfo{
+			info := orasstate.LockInfo{
 				ID:        fmt.Sprintf("contender-%d", i),
 				Operation: "apply",
 				Who:       "contender",
@@ -302,9 +302,9 @@ func TestStateStoreConcurrentLockRivalHolder(t *testing.T) {
 		if err == nil {
 			t.Fatalf("actor %d acquired a rival-held lock", i)
 		}
-		var lockErr *oras.LockError
+		var lockErr *orasstate.LockError
 		if !errors.As(err, &lockErr) {
-			t.Errorf("actor %d failed with %T, want *oras.LockError", i, err)
+			t.Errorf("actor %d failed with %T, want *orasstate.LockError", i, err)
 		} else if lockErr.Info == nil || lockErr.Info.ID != "rival" || lockErr.Info.Who != "rival" {
 			t.Errorf("actor %d diagnostic does not name the holder: %+v", i, lockErr.Info)
 		}
@@ -570,7 +570,7 @@ func TestStateStoreConcurrentLockUnlockMix(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			info := oras.LockInfo{
+			info := orasstate.LockInfo{
 				ID:        fmt.Sprintf("contender-%d", i),
 				Operation: "apply",
 				Who:       "contender",
@@ -1419,7 +1419,7 @@ func TestStateStoreWriteVerifyLockInterrupted(t *testing.T) {
 // wrapper may be invoked concurrently (Terraform runs RPCs in parallel), and
 // independent store CONFIGURATIONS must work in parallel too: actors are
 // split across TWO independently initialized stores, each with its own
-// stateStoreData, *oras.Client, and fake registry endpoint. All locks on
+// stateStoreData, *orasstate.Client, and fake registry endpoint. All locks on
 // DISTINCT workspaces (ws-0..7) succeed, LockIDs are non-empty and distinct,
 // and each group's lockFor registration matches its own lock.
 //
@@ -1439,7 +1439,7 @@ func TestStateStoreConcurrentFwssLock(t *testing.T) {
 	ctx := context.Background()
 
 	// Two independently initialized store configurations: separate
-	// stateStoreData, separate *oras.Client, separate fake registry endpoints.
+	// stateStoreData, separate *orasstate.Client, separate fake registry endpoints.
 	const groups, perGroup = 2, 4
 	const n = groups * perGroup
 	ssds := make([]*stateStoreData, groups)
