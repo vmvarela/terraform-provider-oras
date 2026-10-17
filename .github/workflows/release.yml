@@ -62,7 +62,7 @@ jobs:
             exit 1
           fi
 
-          git tag -a "$TAG" -m "$TAG"
+          git tag "$TAG"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
