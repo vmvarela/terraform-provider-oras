@@ -19,6 +19,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
 	oras "github.com/vmvarela/ghoten-oras-backend/state"
+
+	"github.com/vmvarela/terraform-provider-oras/internal/credentials"
 )
 
 // ProviderData holds provider-level configuration forwarded to state stores
@@ -247,6 +249,7 @@ func (s *OCIStateStore) Initialize(ctx context.Context, req fwss.InitializeReque
 	}
 
 	var orasCfg oras.Config
+	orasCfg.CredentialFunc = credentials.NewResolver(registry, repository)
 
 	// Forward provider-level transport and TLS settings to the ORAS client.
 	if pd, ok := req.ProviderData.(*ProviderData); ok && pd != nil {
