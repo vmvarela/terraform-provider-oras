@@ -26,8 +26,8 @@ categories:
     semver-increment: 'patch'
 change-template: '- $TITLE @$AUTHOR (#$NUMBER)'
 change-title-escapes: '\<*_&'
-# Releases are prerelease-only (-alpha suffixes); without this, the resolver
-# ignores prereleases as "latest" and falls back to v0.0.1.
+# Keep historical prereleases in version resolution while stable releases
+# remain the normal publication path.
 include-pre-releases: true
 sync-labels: true
 autolabeler:

@@ -47,6 +47,9 @@ signs:
 
 release:
   draft: false
+  use_existing_draft: true
+  mode: keep-existing
+  target_commitish: "{{ .Commit }}"
   prerelease: auto
   name_template: "v{{ .Version }}"
   extra_files:
