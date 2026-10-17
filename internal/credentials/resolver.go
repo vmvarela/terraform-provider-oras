@@ -4,8 +4,8 @@ import (
 	"context"
 	"os"
 
-	orasorasstate "github.com/vmvarela/oras-state"
-	orasAuth "orasstate.land/oras-go/v2/registry/remote/auth"
+	orasstate "github.com/vmvarela/oras-state"
+	orasAuth "oras.land/oras-go/v2/registry/remote/auth"
 )
 
 // NewResolver returns the provider-owned OCI credential resolver.
