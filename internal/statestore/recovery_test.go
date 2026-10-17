@@ -13,7 +13,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	fwss "github.com/hashicorp/terraform-plugin-framework/statestore"
 
-	oras "github.com/vmvarela/ghoten-oras-backend/state"
+	orasorasstate "github.com/vmvarela/oras-state"
 )
 
 func TestPublicationRecoveryDiagnostics(t *testing.T) {
@@ -23,10 +23,10 @@ func TestPublicationRecoveryDiagnostics(t *testing.T) {
 	}{
 		{"cancelled", "State write interrupted", "Publication is uncertain", context.Canceled},
 		{"deadline", "State write interrupted", "Publication is uncertain", context.DeadlineExceeded},
-		{"ambiguous", "State publication conflict", "Publication is uncertain", oras.ErrMutableTagMoved},
+		{"ambiguous", "State publication conflict", "Publication is uncertain", orasstate.ErrMutableTagMoved},
 		{"other failure", "Failed to write state", "do not assume nothing was written", errors.New("connection lost")},
-		{"partial", "State version publication failed", "published successfully", &oras.PartialPublicationError{StateTag: "state-tag", VersionTag: "version-tag", Err: oras.ErrMutableTagMoved}},
-		{"cancelled version after state published", "State version publication failed", "published successfully", fmt.Errorf("wrapped: %w", &oras.PartialPublicationError{StateTag: "state-tag", VersionTag: "version-tag", Err: context.Canceled})},
+		{"partial", "State version publication failed", "published successfully", &orasstate.PartialPublicationError{StateTag: "state-tag", VersionTag: "version-tag", Err: orasstate.ErrMutableTagMoved}},
+		{"cancelled version after state published", "State version publication failed", "published successfully", fmt.Errorf("wrapped: %w", &orasstate.PartialPublicationError{StateTag: "state-tag", VersionTag: "version-tag", Err: context.Canceled})},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var diagnostics diag.Diagnostics
