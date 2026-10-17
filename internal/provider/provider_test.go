@@ -11,7 +11,7 @@ import (
 	fwss "github.com/hashicorp/terraform-plugin-framework/statestore"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
-	oras "github.com/vmvarela/ghoten-oras-backend/state"
+	orasorasstate "github.com/vmvarela/oras-state"
 
 	ocistatestore "github.com/vmvarela/terraform-provider-oras/internal/statestore"
 )
@@ -53,9 +53,9 @@ func TestProviderFactory(t *testing.T) {
 }
 
 func TestProviderMetadata(t *testing.T) {
-	origVersion := oras.Version
-	oras.Version = "9.9.9"
-	t.Cleanup(func() { oras.Version = origVersion })
+	origVersion := orasstate.Version
+	orasstate.Version = "9.9.9"
+	t.Cleanup(func() { orasstate.Version = origVersion })
 
 	resp := &provider.MetadataResponse{}
 	(&OrasProvider{}).Metadata(context.Background(), provider.MetadataRequest{}, resp)
