@@ -21,7 +21,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 
-	orasorasstate "github.com/vmvarela/oras-state"
+	orasstate "github.com/vmvarela/oras-state"
 )
 
 func TestParseOCIURL(t *testing.T) {
