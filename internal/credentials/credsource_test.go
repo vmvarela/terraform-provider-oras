@@ -524,12 +524,6 @@ func TestResolverPrecedence(t *testing.T) {
 			password = "cli-pass"
 		}
 	`)
-	home := t.TempDir()
-	setTestHome(t, home)
-	writeTestFile(t, home, ".docker/config.json", `{
-		"auths": {"ghcr.io": {"auth": "`+base64.StdEncoding.EncodeToString([]byte("docker-user:docker-pass"))+`"}}
-	}`)
-
 	t.Run("ORAS_TOKEN beats configured credentials", func(t *testing.T) {
 		clearCredEnv(t)
 		t.Setenv("ORAS_TOKEN", "env-token")
@@ -551,6 +545,11 @@ func TestResolverPrecedence(t *testing.T) {
 
 	t.Run("docker config used without CLI config", func(t *testing.T) {
 		clearCredEnv(t)
+		home := t.TempDir()
+		setTestHome(t, home)
+		writeTestFile(t, home, ".docker/config.json", `{
+			"auths": {"ghcr.io": {"auth": "`+base64.StdEncoding.EncodeToString([]byte("docker-user:docker-pass"))+`"}}
+		}`)
 		cred := resolve(t, "ghcr.io", "org/app")
 		if cred.Username != "docker-user" || cred.Password != "docker-pass" {
 			t.Fatalf("got %+v, want docker credential", cred)
