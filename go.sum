@@ -78,8 +78,8 @@ github.com/vmihailenco/msgpack/v5 v5.4.1 h1:cQriyiUvjTwOHg8QZaPihLWeRAAVoCpE00IU
 github.com/vmihailenco/msgpack/v5 v5.4.1/go.mod h1:GaZTsDaehaPpQVyxrf5mtQlH+pc21PIudVV/E3rRQok=
 github.com/vmihailenco/tagparser/v2 v2.0.0 h1:y09buUbR+b5aycVFQs/g70pqKVZNBmxwAhO7/IwNM9g=
 github.com/vmihailenco/tagparser/v2 v2.0.0/go.mod h1:Wri+At7QHww0WTrCBeu4J6bNtoV6mEfg5OIWRZA9qds=
-github.com/vmvarela/ghoten-oras-backend v0.1.2-0.20261017053150-eaa5e0e5419e h1:Vsm026PRNlaVxG31FiyC0ub8CdeE9QEzW/yvabbmXpA=
-github.com/vmvarela/ghoten-oras-backend v0.1.2-0.20261017053150-eaa5e0e5419e/go.mod h1:Fj0p0vle8NdpsHgpeWRXua36lsCPvAS632jNurBYsV4=
+github.com/vmvarela/oras-state v0.0.0-20261017074614-5bba9f03315c h1:M8XXQTrO8asj/Ywvn2lpLSiYRHBeaLTw1oyVbkNg6S4=
+github.com/vmvarela/oras-state v0.0.0-20261017074614-5bba9f03315c/go.mod h1:dSPRcjupiPY14JQT7ikedH3wCWMDlPIVSE3JNSGt5A0=
 github.com/zclconf/go-cty v1.19.0 h1:IV8WdqYZc2c5rLX9bEoLNXKojBAp0MZPBHMIrCoa/s4=
 github.com/zclconf/go-cty v1.19.0/go.mod h1:12W89jGn3JCOIQi7infWr9m80rOkb5RNYJqXMZcN4c8=
 github.com/zclconf/go-cty-debug v0.0.0-20240509010212-0d6042c53940 h1:4r45xpDWB6ZMSMNJFMOjqrGHynW3DIBuR2H9j0ug+Mo=

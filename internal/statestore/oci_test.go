@@ -21,7 +21,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 
-	oras "github.com/vmvarela/ghoten-oras-backend/state"
+	orasstate "github.com/vmvarela/oras-state"
 )
 
 func TestParseOCIURL(t *testing.T) {
@@ -407,9 +407,9 @@ func TestStateStoreConfigure(t *testing.T) {
 	})
 
 	t.Run("direct client is wrapped", func(t *testing.T) {
-		client, err := oras.NewClient("registry.example.com", "org/repo", oras.Config{})
+		client, err := orasstate.NewClient("registry.example.com", "org/repo", orasstate.Config{})
 		if err != nil {
-			t.Fatalf("oras.NewClient: %v", err)
+			t.Fatalf("orasstate.NewClient: %v", err)
 		}
 		s := &OCIStateStore{}
 		resp := &fwss.ConfigureResponse{}
@@ -418,7 +418,7 @@ func TestStateStoreConfigure(t *testing.T) {
 			t.Fatalf("configure: %v", resp.Diagnostics)
 		}
 		if s.shared == nil || s.shared.client != client || s.client != client {
-			t.Error("direct *oras.Client was not wrapped into shared state")
+			t.Error("direct *orasstate.Client was not wrapped into shared state")
 		}
 	})
 
@@ -630,7 +630,7 @@ func newTestStore(t *testing.T) (*OCIStateStore, *fakeOCIRegistry, *stateStoreDa
 // rival client would publish on the lock tag.
 func rivalLockManifest(t *testing.T, holderID string) []byte {
 	t.Helper()
-	info, err := json.Marshal(oras.LockInfo{ID: holderID, Operation: "plan", Who: "rival", Created: time.Now()})
+	info, err := json.Marshal(orasstate.LockInfo{ID: holderID, Operation: "plan", Who: "rival", Created: time.Now()})
 	if err != nil {
 		t.Fatalf("marshal rival info: %v", err)
 	}
@@ -651,7 +651,7 @@ func rivalLockManifest(t *testing.T, holderID string) []byte {
 
 // ─── Lock / Unlock / Write lifecycle ──────────────────────────────────────────
 
-// testLockTag is lockTagPrefix + workspaceTagFor("default") from internal/oras.
+// testLockTag is lockTagPrefix + workspaceTagFor("default") from internal/orasstate.
 const testWorkspaceTag = "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f"
 const testLockTag = "locked-" + testWorkspaceTag
 const testStateTag = "state-" + testWorkspaceTag

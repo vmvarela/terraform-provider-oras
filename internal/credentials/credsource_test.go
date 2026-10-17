@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	state "github.com/vmvarela/ghoten-oras-backend/state"
+	orasstate "github.com/vmvarela/oras-state"
 	orasAuth "oras.land/oras-go/v2/registry/remote/auth"
 )
 
@@ -508,7 +508,7 @@ func TestResolverPrecedence(t *testing.T) {
 		t.Skip("shell-based credential helper test requires a POSIX shell")
 	}
 
-	resolve := func(t *testing.T, registry, repository string) state.Credential {
+	resolve := func(t *testing.T, registry, repository string) orasstate.Credential {
 		t.Helper()
 		cred, err := NewResolver(registry, repository)(context.Background(), registry)
 		if err != nil {
@@ -560,7 +560,7 @@ func TestResolverPrecedence(t *testing.T) {
 		clearCredEnv(t)
 		setTestHome(t, t.TempDir())
 		cred := resolve(t, "registry.example.com", "some/repo")
-		if cred != (state.Credential{}) {
+		if cred != (orasstate.Credential{}) {
 			t.Fatalf("got %+v, want anonymous credential", cred)
 		}
 	})

@@ -4,7 +4,7 @@ import (
 	"context"
 	"os"
 
-	state "github.com/vmvarela/ghoten-oras-backend/state"
+	orasstate "github.com/vmvarela/oras-state"
 	orasAuth "oras.land/oras-go/v2/registry/remote/auth"
 )
 
@@ -16,10 +16,10 @@ import (
 //  2. GHCR_TOKEN / GITHUB_TOKEN for ghcr.io
 //  3. Terraform CLI config and Docker/containers credential sources
 //  4. anonymous
-func NewResolver(registry, repository string) state.CredentialFunc {
+func NewResolver(registry, repository string) orasstate.CredentialFunc {
 	registry = normalizeRegistryHost(registry)
 
-	return func(ctx context.Context, _ string) (state.Credential, error) {
+	return func(ctx context.Context, _ string) (orasstate.Credential, error) {
 		if token := os.Getenv("ORAS_TOKEN"); token != "" {
 			return stateCredential(tokenCredential(registry, token)), nil
 		}
@@ -35,7 +35,7 @@ func NewResolver(registry, repository string) state.CredentialFunc {
 		if cred, ok := resolveConfiguredCredential(ctx, registry, repository); ok {
 			return stateCredential(cred), nil
 		}
-		return state.Credential{}, nil
+		return orasstate.Credential{}, nil
 	}
 }
 
@@ -47,8 +47,8 @@ func tokenCredential(registry, token string) orasAuth.Credential {
 	return orasAuth.Credential{AccessToken: token}
 }
 
-func stateCredential(cred orasAuth.Credential) state.Credential {
-	return state.Credential{
+func stateCredential(cred orasAuth.Credential) orasstate.Credential {
+	return orasstate.Credential{
 		Username:    cred.Username,
 		Password:    cred.Password,
 		AccessToken: cred.AccessToken,
