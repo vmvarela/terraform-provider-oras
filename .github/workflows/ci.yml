@@ -71,6 +71,11 @@ jobs:
         with:
           version: v2.12
 
+      - name: Validate GoReleaser configuration
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          args: check
+
   govulncheck:
     name: Vulnerability scan
     runs-on: ubuntu-latest
