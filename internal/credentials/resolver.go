@@ -12,10 +12,10 @@ import (
 //
 // Precedence is intentionally the same as the provider used before extracting
 // the shared state engine:
-//   1. ORAS_TOKEN
-//   2. GHCR_TOKEN / GITHUB_TOKEN for ghcr.io
-//   3. Terraform CLI config and Docker/containers credential sources
-//   4. anonymous
+//  1. ORAS_TOKEN
+//  2. GHCR_TOKEN / GITHUB_TOKEN for ghcr.io
+//  3. Terraform CLI config and Docker/containers credential sources
+//  4. anonymous
 func NewResolver(registry, repository string) state.CredentialFunc {
 	registry = normalizeRegistryHost(registry)
 
