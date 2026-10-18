@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - master
+    paths-ignore:
+      - VERSION
   # pull_request_target runs with the base-branch GITHUB_TOKEN, so the
   # autolabeler can label fork PRs. The action works metadata-only via the API:
   # no checkout, no PR code execution.
