@@ -19,6 +19,8 @@ No resources, no data sources. The provider exists solely to expose the `oras_oc
 - `TF_ENABLE_PLUGGABLE_STATE_STORAGE=1`, or `terraform init -enable-pluggable-state-storage-experiment`
 - If a pre-release version is published (e.g. `0.1.6-alpha`), pin it exactly (`version = "0.1.6-alpha"`): Terraform's range operators (`~>`, `>=`, …) never select pre-release versions
 
+Which Terraform and registry versions are tested (and which are unavailable or untested): [Compatibility](guides/compatibility.md).
+
 ## Example Usage
 
 ```hcl
@@ -141,7 +143,7 @@ Integration tests should call `client.WaitForRetention()` before asserting on ta
 
 ## Limitations
 
-- Alpha Terraform only. Stable releases (including 1.16.x and 1.17.0) do not support pluggable state storage.
+- Alpha Terraform only. Stable releases (including 1.16.x) do not support pluggable state storage. See [Compatibility](guides/compatibility.md) for the tested baseline and unsupported versions.
 - GHCR pruning requires `delete:packages`.
 - No migration tool. Use `terraform state pull` and `terraform state push` to move existing state in.
 
