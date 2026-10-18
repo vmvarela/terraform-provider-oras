@@ -88,11 +88,12 @@ func TestUnknownTransportConfiguration(t *testing.T) {
 func TestTransportRequests(t *testing.T) {
 	t.Setenv("ORAS_TOKEN", "transport-test-token")
 	for _, tc := range []struct {
-		name      string
-		tls       bool
-		options   map[string]tftypes.Value
-		ca        string
-		wantError bool
+		name       string
+		tls        bool
+		options    map[string]tftypes.Value
+		ca         string
+		wantError  bool
+		rejectAuth bool
 	}{
 		{name: "default rejects untrusted TLS", tls: true, wantError: true},
 		{name: "custom CA verifies TLS", tls: true, ca: "server"},
@@ -104,6 +105,7 @@ func TestTransportRequests(t *testing.T) {
 		{name: "legacy true retains HTTP", options: map[string]tftypes.Value{"insecure": tftypes.NewValue(tftypes.Bool, true)}},
 		{name: "legacy false retains verified HTTPS", tls: true, ca: "server", options: map[string]tftypes.Value{"insecure": tftypes.NewValue(tftypes.Bool, false)}},
 		{name: "legacy HTTP with CA remains accepted", ca: "server", options: map[string]tftypes.Value{"insecure": tftypes.NewValue(tftypes.Bool, true)}},
+		{name: "registry denies configured token", options: map[string]tftypes.Value{"plain_http": tftypes.NewValue(tftypes.Bool, true)}, rejectAuth: true, wantError: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var requests atomic.Int32
@@ -126,6 +128,12 @@ func TestTransportRequests(t *testing.T) {
 				}
 				if r.URL.Path != "/v2/test/repo/tags/list" {
 					t.Error("unexpected registry operation")
+				}
+				if tc.rejectAuth {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusForbidden)
+					_, _ = io.WriteString(w, `{"errors":[{"code":"DENIED","message":"credentials rejected"}]}`)
+					return
 				}
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = io.WriteString(w, `{"name":"test/repo","tags":[]}`)
@@ -213,16 +221,27 @@ func TestTransportRequests(t *testing.T) {
 			if states.Diagnostics.HasError() != tc.wantError {
 				t.Fatalf("request error = %v, want %v", states.Diagnostics.HasError(), tc.wantError)
 			}
-			if tc.wantError && requests.Load() != 0 {
+			if tc.wantError && !tc.rejectAuth && requests.Load() != 0 {
 				t.Fatal("failed TLS verification/fallback sent an application request")
+			}
+			if tc.rejectAuth && requests.Load() == 0 {
+				t.Fatal("registry did not receive the configured credential")
 			}
 			if !tc.wantError && requests.Load() == 0 {
 				t.Fatal("no registry request observed")
 			}
+			var authFailureReported bool
 			for _, d := range states.Diagnostics {
-				if strings.Contains(d.Detail(), "transport-test-token") {
+				detail := d.Detail()
+				if strings.Contains(detail, "transport-test-token") {
 					t.Fatal("diagnostic leaked a credential")
 				}
+				if tc.rejectAuth && strings.Contains(detail, "403") {
+					authFailureReported = true
+				}
+			}
+			if tc.rejectAuth && !authFailureReported {
+				t.Fatal("authentication diagnostic does not report the registry's 403 response")
 			}
 		})
 	}
