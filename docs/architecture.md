@@ -179,7 +179,7 @@ The CI workflow is the canonical end-to-end environment for the Terraform alpha 
 The provider requires a compatible Terraform alpha build with the pluggable state
 storage experiment enabled; stable Terraform releases do not expose this
 experiment. The tested baseline and unsupported versions are documented in
-[Compatibility](compatibility.md).
+[Compatibility](guides/compatibility.md).
 
 Terraform protocol/framework compatibility is tracked in this repository; OCI
 registry behavior remains owned by `oras-state`.
