@@ -41,6 +41,7 @@ terraform init && terraform apply
 ```
 
 Full configuration reference, storage layout, and locking semantics: [`docs/index.md`](docs/index.md).
+Tested Terraform and registry versions: [`docs/compatibility.md`](docs/compatibility.md).
 Provider/engine boundary and consistency model: [`docs/architecture.md`](docs/architecture.md).
 The registry-facing state engine is [`vmvarela/oras-state`](https://github.com/vmvarela/oras-state), pinned as a normal Go module dependency.
 Credential resolution: [`docs/guides/authentication.md`](docs/guides/authentication.md).
