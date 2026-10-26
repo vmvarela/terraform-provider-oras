@@ -6,8 +6,8 @@ require (
 	github.com/hashicorp/hcl/v2 v2.25.0
 	github.com/hashicorp/terraform-plugin-framework v1.19.0
 	github.com/hashicorp/terraform-plugin-go v0.31.0
-	github.com/vmvarela/oras-state v0.1.0
-	oras.land/oras-go/v2 v2.6.3
+	github.com/vmvarela/oras-state v0.2.2
+	oras.land/oras-go/v2 v2.6.4
 )
 
 require (
