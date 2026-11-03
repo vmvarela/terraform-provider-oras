@@ -60,7 +60,7 @@ func dockerConfigPaths() []string {
 
 // loadDockerConfig reads and parses a Docker-style config file.
 func loadDockerConfig(path string) (*dockerConfigFile, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is the operator's Docker config location from env or HOME, read intentionally
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +98,7 @@ func dockerHelperCredential(ctx context.Context, helper, registryDomain string) 
 	ctx, cancel := context.WithTimeout(ctx, dockerHelperTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, bin, "get")
+	cmd := exec.CommandContext(ctx, bin, "get") // #nosec G204 -- helper name comes from the operator's Docker config and only ever resolves to docker-credential-*
 	// ponytail: killed shell leaves grandchildren holding the stdout pipe;
 	// WaitDelay closes pipes 2s after ctx cancel instead of blocking on them.
 	// Raise WaitDelay (or drop to 0) if a real credential helper ever reports
