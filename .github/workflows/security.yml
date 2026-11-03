@@ -1,0 +1,55 @@
+name: Security
+on:
+  push:
+    branches: [master]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  gosec:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Install gosec
+        run: >-
+          GOBIN="$RUNNER_TEMP/bin" go install
+          -ldflags '-X main.Version=2.30.0 -X main.GitTag=v2.30.0'
+          github.com/securego/gosec/v2/cmd/gosec@v2.30.0
+      - name: Scan production code
+        id: scan
+        env:
+          GOSEC_AI_PROVIDER: ''
+          GOSEC_AI_API_KEY: ''
+        run: >-
+          "$RUNNER_TEMP/bin/gosec" -nosec-require-rules -nosec-require-justification
+          -fmt sarif -out "$RUNNER_TEMP/gosec.sarif" -stdout -verbose json
+          ./... > "$RUNNER_TEMP/gosec.json"
+      - name: Check SARIF
+        id: sarif
+        # Never upload a partial analysis: it could close valid alerts.
+        if: ${{ !cancelled() && (steps.scan.outcome == 'success' || steps.scan.outcome == 'failure') }}
+        shell: python3 {0}
+        run: |
+          import json, os
+          tmp = os.environ["RUNNER_TEMP"]
+          errors = json.load(open(f"{tmp}/gosec.json"))["Golang errors"]
+          if errors:
+              raise SystemExit(f"gosec could not analyze every package: {json.dumps(errors)}")
+          if os.path.getsize(f"{tmp}/gosec.sarif") == 0:
+              raise SystemExit("gosec SARIF is empty")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write("exists=true\n")
+      - uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        if: ${{ !cancelled() && steps.sarif.outputs.exists == 'true' }}
+        with:
+          sarif_file: ${{ runner.temp }}/gosec.sarif
+          category: gosec

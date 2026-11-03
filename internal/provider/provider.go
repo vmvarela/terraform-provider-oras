@@ -96,7 +96,7 @@ func (p *OrasProvider) ValidateConfig(ctx context.Context, req provider.Validate
 	if !cfg.CAFile.IsNull() && !cfg.CAFile.IsUnknown() {
 		caFile := cfg.CAFile.ValueString()
 		if caFile != "" {
-			f, err := os.Open(caFile)
+			f, err := os.Open(caFile) // #nosec G304 -- ca_file is operator input, opening it is the feature
 			if err != nil {
 				resp.Diagnostics.AddAttributeError(
 					path.Root("ca_file"),

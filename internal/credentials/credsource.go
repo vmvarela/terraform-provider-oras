@@ -134,7 +134,7 @@ func loadCLIConfig(path string) (*cliConfig, error) {
 	if path == "" {
 		return nil, nil
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is the Terraform CLI config location the operator configured, read intentionally
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
