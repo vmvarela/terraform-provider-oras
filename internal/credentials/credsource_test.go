@@ -12,7 +12,6 @@ import (
 	"time"
 
 	orasstate "github.com/vmvarela/oras-state"
-	orasAuth "oras.land/oras-go/v2/registry/remote/auth"
 )
 
 // clearCredEnv clears all environment variables that influence credential
@@ -181,13 +180,13 @@ func TestDecodeDockerAuth(t *testing.T) {
 		name     string
 		auth     string
 		wantOK   bool
-		wantCred orasAuth.Credential
+		wantCred orasstate.Credential
 	}{
 		{
 			name:     "password containing colon",
 			auth:     base64.StdEncoding.EncodeToString([]byte("user:pass:word")),
 			wantOK:   true,
-			wantCred: orasAuth.Credential{Username: "user", Password: "pass:word"},
+			wantCred: orasstate.Credential{Username: "user", Password: "pass:word"},
 		},
 		{
 			name:   "no colon",
@@ -415,10 +414,10 @@ func TestLoadCLIConfig(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		// ghcr.io: basic auth (Username "x" + token as Password); RefreshToken
-		// intentionally dropped to avoid the OAuth2 refresh grant.
+		// ghcr.io: basic auth (Username "x" + token as Password). The shared
+		// credential has no refresh token, so the refresh grant cannot trigger.
 		cred, ok := cliBlockCredential(context.Background(), cfg.Credentials[0], "ghcr.io")
-		if !ok || cred.Username != "x" || cred.Password != "at" || cred.RefreshToken != "" {
+		if !ok || cred.Username != "x" || cred.Password != "at" || cred.AccessToken != "" {
 			t.Errorf("got ok=%v cred=%+v", ok, cred)
 		}
 	})

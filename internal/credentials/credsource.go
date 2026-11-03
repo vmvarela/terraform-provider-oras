@@ -12,8 +12,8 @@ import (
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/gohcl"
 	"github.com/hashicorp/hcl/v2/hclparse"
-	orasRegistry "oras.land/oras-go/v2/registry"
-	orasAuth "oras.land/oras-go/v2/registry/remote/auth"
+	orasProperties "github.com/oras-project/oras-go/v3/registry/remote/properties"
+	orasstate "github.com/vmvarela/oras-state"
 )
 
 // cliCredentialBlock is one oci_credentials block from the Terraform CLI config.
@@ -72,11 +72,11 @@ func parseConfigKey(key string) (domain, path string, ok bool) {
 	if !strings.Contains(key, "/") {
 		return key, "", true
 	}
-	ref, err := orasRegistry.ParseReference(key)
+	ref, err := orasProperties.NewReference(key)
 	if err != nil {
 		return "", "", false
 	}
-	if ref.Reference != "" {
+	if ref.Tag != "" || ref.Digest != "" {
 		// Key contains a tag or digest — not a valid config key.
 		return "", "", false
 	}
@@ -186,26 +186,20 @@ func validateCLICredentialBlock(block cliCredentialBlock) error {
 
 // cliBlockCredential converts a validated oci_credentials block into a
 // credential, invoking the docker helper if configured.
-func cliBlockCredential(ctx context.Context, block cliCredentialBlock, domain string) (orasAuth.Credential, bool) {
+func cliBlockCredential(ctx context.Context, block cliCredentialBlock, domain string) (orasstate.Credential, bool) {
 	switch {
 	case block.DockerCredentialsHelper != "":
 		return dockerHelperCredential(ctx, block.DockerCredentialsHelper, domain)
 	case block.AccessToken != "":
-		cred := tokenCredential(domain, block.AccessToken)
-		if domain != "ghcr.io" {
-			// GHCR requires basic auth; a RefreshToken would push oras-go
-			// into the OAuth2 refresh grant, bypassing the exchange.
-			cred.RefreshToken = block.RefreshToken
-		}
-		return cred, true
+		return tokenCredential(domain, block.AccessToken), true
 	default:
-		return orasAuth.Credential{Username: block.Username, Password: block.Password}, true
+		return orasstate.Credential{Username: block.Username, Password: block.Password}, true
 	}
 }
 
 // credCandidate pairs a credential with its specificity.
 type credCandidate struct {
-	cred orasAuth.Credential
+	cred orasstate.Credential
 	spec int
 }
 
@@ -214,7 +208,7 @@ type credCandidate struct {
 // (3) Docker/containers config files. First-wins on equal specificity.
 func configuredCredentialCandidates(ctx context.Context, domain, path string) []credCandidate {
 	var candidates []credCandidate
-	add := func(key string, cred orasAuth.Credential, ok bool) {
+	add := func(key string, cred orasstate.Credential, ok bool) {
 		if !ok {
 			return
 		}
@@ -266,7 +260,7 @@ func configuredCredentialCandidates(ctx context.Context, domain, path string) []
 // resolveConfiguredCredential picks the highest-specificity configured
 // credential for the registry. First candidate wins on ties. Returns false
 // when nothing matches, so the caller falls through to anonymous access.
-func resolveConfiguredCredential(ctx context.Context, registryDomain, repositoryPath string) (orasAuth.Credential, bool) {
+func resolveConfiguredCredential(ctx context.Context, registryDomain, repositoryPath string) (orasstate.Credential, bool) {
 	best := credCandidate{spec: 0}
 	for _, cand := range configuredCredentialCandidates(ctx, registryDomain, repositoryPath) {
 		if cand.spec > best.spec {
@@ -274,7 +268,7 @@ func resolveConfiguredCredential(ctx context.Context, registryDomain, repository
 		}
 	}
 	if best.spec == 0 {
-		return orasAuth.Credential{}, false
+		return orasstate.Credential{}, false
 	}
 	return best.cred, true
 }
