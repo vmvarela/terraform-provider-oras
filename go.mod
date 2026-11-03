@@ -1,6 +1,6 @@
 module github.com/vmvarela/terraform-provider-oras
 
-go 1.26.9
+go 1.26.10
 
 require (
 	github.com/hashicorp/hcl/v2 v2.25.0
