@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	orasAuth "oras.land/oras-go/v2/registry/remote/auth"
+	orasstate "github.com/vmvarela/oras-state"
 )
 
 // dockerHelperTimeout is the exec deadline for a docker credential helper.
@@ -74,26 +74,26 @@ func loadDockerConfig(path string) (*dockerConfigFile, error) {
 // decodeDockerAuth decodes a base64 "auth" field ("username:password") into a
 // credential. Split on the FIRST colon; returns false when the entry has no
 // colon or is empty.
-func decodeDockerAuth(auth string) (orasAuth.Credential, bool) {
+func decodeDockerAuth(auth string) (orasstate.Credential, bool) {
 	if auth == "" {
-		return orasAuth.Credential{}, false
+		return orasstate.Credential{}, false
 	}
 	raw, err := base64.StdEncoding.DecodeString(auth)
 	if err != nil {
-		return orasAuth.Credential{}, false
+		return orasstate.Credential{}, false
 	}
 	user, pass, ok := strings.Cut(string(raw), ":")
 	if !ok {
-		return orasAuth.Credential{}, false
+		return orasstate.Credential{}, false
 	}
-	return orasAuth.Credential{Username: user, Password: pass}, true
+	return orasstate.Credential{Username: user, Password: pass}, true
 }
 
 // dockerHelperCredential invokes docker-credential-<helper> get and parses the
 // JSON output into a credential. All failures (not-found exit 1, exec errors,
 // timeouts, unparseable output) are logged and treated as not-found so that
 // auto-discovered sources are skipped rather than failing the operation.
-func dockerHelperCredential(ctx context.Context, helper, registryDomain string) (orasAuth.Credential, bool) {
+func dockerHelperCredential(ctx context.Context, helper, registryDomain string) (orasstate.Credential, bool) {
 	bin := "docker-credential-" + helper
 	ctx, cancel := context.WithTimeout(ctx, dockerHelperTimeout)
 	defer cancel()
@@ -118,7 +118,7 @@ func dockerHelperCredential(ctx context.Context, helper, registryDomain string) 
 		} else {
 			slog.Warn("docker credential helper failed; skipping this credential source", "helper", bin, "error", err)
 		}
-		return orasAuth.Credential{}, false
+		return orasstate.Credential{}, false
 	}
 
 	var resp struct {
@@ -128,10 +128,10 @@ func dockerHelperCredential(ctx context.Context, helper, registryDomain string) 
 	}
 	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
 		slog.Debug("docker credential helper returned unparseable output", "helper", bin, "error", err)
-		return orasAuth.Credential{}, false
+		return orasstate.Credential{}, false
 	}
 	if resp.Username == "" && resp.Secret == "" {
-		return orasAuth.Credential{}, false
+		return orasstate.Credential{}, false
 	}
-	return orasAuth.Credential{Username: resp.Username, Password: resp.Secret}, true
+	return orasstate.Credential{Username: resp.Username, Password: resp.Secret}, true
 }
