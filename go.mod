@@ -7,7 +7,7 @@ require (
 	github.com/hashicorp/terraform-plugin-framework v1.19.0
 	github.com/hashicorp/terraform-plugin-go v0.31.0
 	github.com/oras-project/oras-go/v3 v3.0.0
-	github.com/vmvarela/oras-state v0.2.3
+	github.com/vmvarela/oras-state v0.4.0
 )
 
 require (
